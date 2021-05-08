@@ -8,3 +8,4 @@ Michael Wright
 
 Installs:
 react-router-dom
+firebase
