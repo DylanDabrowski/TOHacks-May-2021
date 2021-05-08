@@ -1,13 +1,28 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import "./Navbar.css";
+import { Link } from "react-router-dom";
+import logo from "../assets/intact-logo.png";
 
 function Navbar() {
   return (
-    <div>
-      <h1>Navbar</h1>
-
-    </div>
+    <nav className="navbar">
+      <div className="navbar-container">
+        <Link to="/" className="navbar-logo">
+          <img src={logo} />
+        </Link>
+        <ul className="nav-menu">
+          <li className="nav-item">
+            <Link to="/carinsurance" className="nav-links">
+              <h2>Car Insurance</h2>
+            </Link>
+            <Link to="/login" className="nav-links">
+              <h2>Login</h2>
+            </Link>
+          </li>
+        </ul>
+      </div>
+    </nav>
   );
 }
 
