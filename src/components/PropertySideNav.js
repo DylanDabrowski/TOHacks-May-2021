@@ -1,7 +1,7 @@
 import React from "react";
 import "./SideNav.css";
 import { Link } from "react-router-dom";
-import logo from "./assets/intact-logo.png";
+import logo from "../assets/intact-logo.png";
 
 const SideNav = () => {
   return (
