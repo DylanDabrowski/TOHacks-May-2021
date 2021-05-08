@@ -1,17 +1,10 @@
-import React from 'react'
+import React from "react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { auth } from '../../Firebase';
+import { auth } from "../../firebase";
 
-function Login(){
-
-   
-return( 
-    <div>
-        
-
-    </div>
-    );
+function Login() {
+  return <div></div>;
 }
 
 export default Login;

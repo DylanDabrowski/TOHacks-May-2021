@@ -1,5 +1,5 @@
 import React from "react";
-import SideNav from "../../../PropertySideNav.js";
+import SideNav from "../../PropertySideNav.js";
 
 function PropertyClaim() {
   return (

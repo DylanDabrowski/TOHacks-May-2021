@@ -1,6 +1,6 @@
 import React from "react";
 import "./CarClaim.css";
-import SideNav from "../../../CarSideNav.js";
+import SideNav from "../../CarSideNav.js";
 
 function CarClaim() {
   return (
