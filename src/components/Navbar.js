@@ -16,6 +16,11 @@ function Navbar() {
               <h2>Car Insurance</h2>
             </Link>
           </li>
+          <li className="nav-item">
+            <Link to="/propertyinsurance" className="nav-links">
+              <h2>Property Insurance</h2>
+            </Link>
+          </li>
         </ul>
       </div>
     </nav>
