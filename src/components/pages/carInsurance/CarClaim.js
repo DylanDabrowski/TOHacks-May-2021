@@ -1,9 +1,11 @@
 import React from "react";
-import "./Claim.css"
+import "./CarClaim.css";
+import SideNav from "../../../CarSideNav.js";
 
-function CarInsurance() {
+function CarClaim() {
   return (
     <div>
+      <SideNav />
       <div>
         <h2>What type of claim would you like to make?</h2>
         <div className="CarInsurance">
@@ -12,7 +14,7 @@ function CarInsurance() {
           </div>
           <h2>Collision</h2>
         </div>
-        <div className="CarInsurance"> 
+        <div className="CarInsurance">
           <div className="CarInsuranceIcon">
             <i class="fas fa-cloud-showers-heavy fa-5x"></i>
           </div>
@@ -26,7 +28,7 @@ function CarInsurance() {
         </div>
         <div className="CarInsurance">
           <div className="CarInsuranceIcon">
-          <i class="fas fa-mask fa-5x"></i>
+            <i class="fas fa-mask fa-5x"></i>
           </div>
           <h2>Theft</h2>
         </div>
@@ -52,4 +54,4 @@ function CarInsurance() {
   );
 }
 
-export default CarInsurance;
+export default CarClaim;
