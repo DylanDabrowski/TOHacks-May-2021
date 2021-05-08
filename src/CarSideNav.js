@@ -13,7 +13,8 @@ const CarSideNav = () => {
         <Link className="sidenav-links" to="/carclaim">
           Make a Claim
         </Link>
-        <Link className="sidenav-links">Previous Claims</Link>
+        <Link className="sidenav-links" to="/carhistory">History</Link>
+        <Link className="sidenav-links" to="/carmydrive">My Drive</Link>
       </div>
     </div>
   );
