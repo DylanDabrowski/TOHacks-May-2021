@@ -4,14 +4,13 @@ import { BrowserRouter as Router, Switch, Route } from "react-router-dom";
 import Navbar from "./components/Navbar.js";
 import LandingPage from "./components/pages/LandingPage.js";
 import CarInsurance from "./components/pages/CarInsurance.js";
-import PropertyInsurance from "./components/pages/PropertyInsurance.js";
+import PropertyInsurance from "./components/pages/property/PropertyInsurance.js";
 import Login from "./components/pages/Login";
 
 function App() {
   return (
     <div className="App">
       <Router>
-        <Navbar />
         <Switch>
           <Route path="/" exact component={LandingPage} />
           <Route path="/carinsurance" component={CarInsurance} />
