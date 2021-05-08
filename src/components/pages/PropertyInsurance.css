@@ -1,0 +1,11 @@
+.property-navbar {
+  display: flex;
+  align-items: center;
+}
+
+.property-navbar-container {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
