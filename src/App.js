@@ -5,6 +5,7 @@ import Navbar from "./components/Navbar.js";
 import Home from "./components/pages/Home.js";
 import CarInsurance from "./components/pages/CarInsurance.js";
 import PropertyInsurance from "./components/pages/PropertyInsurance.js";
+import Login from "./components/pages/Login";
 
 function App() {
   return (
@@ -15,6 +16,7 @@ function App() {
           <Route path="/" exact component={Home} />
           <Route path="/carinsurance" component={CarInsurance} />
           <Route path="/propertyinsurance" component={PropertyInsurance} />
+          <Route path="/Login" component={Login} />
         </Switch>
       </Router>
     </div>
