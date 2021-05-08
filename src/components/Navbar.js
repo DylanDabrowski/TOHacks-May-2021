@@ -15,16 +15,15 @@ function Navbar() {
             <Link to="/carinsurance" className="nav-links">
               <h2>Car Insurance</h2>
             </Link>
-           
-          </li>
-          <li>
-          <Link to="/login" className="nav-links">
-              <h2>Login</h2>
-            </Link>
           </li>
           <li className="nav-item">
             <Link to="/propertyinsurance" className="nav-links">
               <h2>Property Insurance</h2>
+            </Link>
+          </li>
+          <li className="nav-item">
+            <Link to="/login" className="nav-links">
+              <h2>Login</h2>
             </Link>
           </li>
         </ul>
