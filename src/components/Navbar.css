@@ -1,5 +1,4 @@
 .navbar {
-  height: 80px;
   display: flex;
 
   align-items: center;
@@ -7,20 +6,20 @@
   position: sticky;
   top: 0;
   z-index: 999;
+  border: 1px solid black;
 }
 
 .navbar-container {
   display: flex;
   justify-content: center;
   align-items: center;
-  height: 80px;
   max-width: 1500px;
+  border: 1px solid black;
 }
 
 .navbar-logo {
   justify-self: start;
   margin-left: 20px;
-  margin-top: 20px;
   cursor: pointer;
   display: flex;
   align-items: center;

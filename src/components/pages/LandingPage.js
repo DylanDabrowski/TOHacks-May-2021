@@ -7,7 +7,7 @@ function LandingPage() {
       <Link to="/carinsurance" className="nav-links">
         <h2>Car Insurance</h2>
       </Link>
-      <Link to="/propertyinsurance" className="nav-links">
+      <Link to="/propertyclaim" className="nav-links">
         <h2>Property Insurance</h2>
       </Link>
       <Link to="/login" className="nav-links">
