@@ -1,5 +1,5 @@
 import React from "react";
-import "./CarClaim.css";
+import "./CarInsurance.css";
 import SideNav from "../../../CarSideNav.js";
 
 function CarClaim() {
