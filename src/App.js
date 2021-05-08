@@ -3,7 +3,7 @@ import "./App.css";
 import { BrowserRouter as Router, Switch, Route } from "react-router-dom";
 import Navbar from "./components/Navbar.js";
 import LandingPage from "./components/pages/LandingPage.js";
-import CarInsurance from "./components/pages/CarInsurance.js";
+import CarInsurance from "./components/pages/carInsurance/Claim.js";
 import PropertyInsurance from "./components/pages/PropertyInsurance.js";
 import Login from "./components/pages/Login";
 
