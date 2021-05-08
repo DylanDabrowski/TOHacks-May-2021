@@ -1,33 +1,9 @@
-import React, { useRef } from 'react'
-import { auth } from './../../Firebase';
+import React from "react";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 
-
-const Signin = () => {
-    const emailRef = useRef(null);
-    const passwordRef = useRef(null);
-
-    const signIn = e => {
-        e.preventDefault();
-        auth.signInWithEmailAndPassword(
-            emailRef.current.value,
-            passwordRef.current.value
-        ).then(user => {
-            console.log(user)
-        }).catch(err => {
-            console.log(err)
-        })
-    }
-    return (
-        <div className="signin">
-            <form action="">
-                <h1>Sign in</h1>
-                <input ref={emailRef} type="email" />
-                <input ref={passwordRef} type="password" />
-                <button onClick={signIn}>Sign in </button>
-                <h6>Not yet register? <span className="signin__link">Sign up</span></h6>
-            </form>
-        </div>
-    )
+function Login() {
+  return <div></div>;
 }
 
-export default Signin
+export default Login;
