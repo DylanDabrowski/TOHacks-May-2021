@@ -1,11 +1,6 @@
 import React from "react";
-<<<<<<< HEAD
 import "./CarInsurance.css";
 import SideNav from "../../../CarSideNav.js";
-=======
-import "./CarClaim.css";
-import SideNav from "../../CarSideNav.js";
->>>>>>> 8cbf110c63187990405c2f6e1465781edf09e857
 
 function CarClaim() {
   return (
