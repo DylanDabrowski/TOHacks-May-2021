@@ -10,8 +10,12 @@ const SideNav = (props) => {
         <img src={logo} />
       </Link>
       <div className="sidenav-container">
-        <Link className="sidenav-links">Make a Claim</Link>
-        <Link className="sidenav-links">Previous Claims</Link>
+        <Link className="sidenav-links" to="/propertyclaim">
+          Make a Claim
+        </Link>
+        <Link className="sidenav-links" to="/prevpropertyclaims">
+          Previous Claims
+        </Link>
       </div>
     </div>
   );
