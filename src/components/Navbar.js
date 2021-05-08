@@ -1,6 +1,6 @@
 import React from "react";
-import "./Navbar.css";
 import { Link } from "react-router-dom";
+import "./Navbar.css";
 import logo from "../assets/intact-logo.png";
 
 function Navbar() {
@@ -14,6 +14,12 @@ function Navbar() {
           <li className="nav-item">
             <Link to="/carinsurance" className="nav-links">
               <h2>Car Insurance</h2>
+            </Link>
+           
+          </li>
+          <li>
+          <Link to="/login" className="nav-links">
+              <h2>Login</h2>
             </Link>
           </li>
           <li className="nav-item">
