@@ -18,7 +18,7 @@ const Signin = () => {
       )
       .then((user) => {
         console.log(user);
-        history.push('/');
+        history.push('/autohome');
       })
       .catch((err) => {
         console.log(err);
