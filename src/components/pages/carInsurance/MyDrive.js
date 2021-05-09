@@ -19,13 +19,6 @@ const fetchInfo = async() => {
   })
 }
 
-const fetchImageInfo = async() => {
-  const imgResponse = db.storage().ref("users/" + db.auth().currentUser.uid + "/profile.png")
-  const imgData = await imgResponse.getDownloadURL()
-  imgData.then((dbImage) => {
-    setImage([...dbImage. dbImage.data()]);
-  })
-}
 
 useEffect(() => {
   fetchInfo();
