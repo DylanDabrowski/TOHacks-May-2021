@@ -2,10 +2,12 @@ import React, { useRef } from "react";
 import { auth } from "../../firebase";
 import "./Login.css";
 import truck from "../../assets/truck.png";
+import { useHistory } from "react-router";
 
 const Signin = () => {
   const emailRef = useRef(null);
   const passwordRef = useRef(null);
+  const history = useHistory();
 
   const signIn = (e) => {
     e.preventDefault();
@@ -16,6 +18,7 @@ const Signin = () => {
       )
       .then((user) => {
         console.log(user);
+        history.push('/');
       })
       .catch((err) => {
         console.log(err);
