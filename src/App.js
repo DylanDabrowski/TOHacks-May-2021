@@ -9,18 +9,20 @@ import CarMyDrive from "./components/pages/CarInsurance/MyDrive";
 import PropertyClaim from "./components/pages/property/PropertyClaim.js";
 import PrevPropertyClaims from "./components/pages/property/PrevPropertyClaims.js";
 import Login from "./components/pages/Login";
+import AutoHome from "./components/pages/AutoHome";
 
 function App() {
   return (
     <div className="App">
       <Router>
         <Switch>
-          <Route path="/" exact component={LandingPage} />
+          <Route path="/" exact component={Login} />
           <Route path="/carclaim" component={CarClaim} />
           <Route path="/carhistory" component={CarHistory} />
           <Route path="/carmydrive" component={CarMyDrive} />
           <Route path="/propertyclaim" component={PropertyClaim} />
           <Route path="/prevpropertyclaims" component={PrevPropertyClaims} />
+          <Route path="/autohome" component={AutoHome} />
           <Route path="/login" component={Login} />
         </Switch>
       </Router>
