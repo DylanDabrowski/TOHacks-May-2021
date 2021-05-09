@@ -1,0 +1,63 @@
+.mydrive {
+  background-color: #ededed;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  margin-left: 325px;
+}
+
+.mydrive > img {
+  width: 18%;
+}
+
+.row {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  margin: 10px;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  margin: 20px;
+}
+
+.score {
+  font-size: 35px;
+  background-color: #fff;
+  align-items: center;
+  justify-content: center;
+  width: 120px;
+  padding: 50px;
+  border-radius: 20%;
+  box-shadow: 0 6px 6px rgba(0, 0, 0, 0.2);
+}
+
+.results-box-good {
+  font-size: 35px;
+  color: lime;
+  background-color: #fff;
+  align-items: center;
+  justify-content: center;
+  width: 120px;
+  padding: 50px;
+  border-radius: 20%;
+  box-shadow: 0 6px 6px rgba(0, 0, 0, 0.2);
+}
+
+.results-box-bad {
+  font-size: 35px;
+  color: red;
+  background-color: #fff;
+  align-items: center;
+  justify-content: center;
+  width: 120px;
+  padding: 50px;
+  border-radius: 20%;
+  box-shadow: 0 6px 6px rgba(0, 0, 0, 0.2);
+}
