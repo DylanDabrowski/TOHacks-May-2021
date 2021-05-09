@@ -44,7 +44,6 @@ function PropertyClaim() {
       <div className="address-textfield">
         <h2>Property Address</h2>
         <input type="text" id="address" name="address" />
-        <input type="submit" value="Submit" />
       </div>
       <div className="description-textfield">
         <h2>Description of damage</h2>

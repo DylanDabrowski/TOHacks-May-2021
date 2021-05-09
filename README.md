@@ -9,3 +9,8 @@ Michael Wright
 Installs:  
 react-router-dom  
 firebase
+react-scripts --save
+
+Test Login:  
+email: admin@admin.com  
+pass: admin12345
