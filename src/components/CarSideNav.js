@@ -15,6 +15,7 @@ const CarSideNav = () => {
         </Link>
         <Link className="sidenav-links" to="/carhistory">History</Link>
         <Link className="sidenav-links" to="/carmydrive">My Drive</Link>
+        <Link className="sidenav-links" to="/">Logout</Link>
       </div>
     </div>
   );
