@@ -8,18 +8,35 @@ function PropertyClaim() {
       <SideNav />
       <div>
         <h2>What type of claim would you like to make?</h2>
-        <div className="CarInsurance">
+        <div>
+          <h2>What type of claim would you like to make?</h2>
           <div className="CarInsurance">
-            <input type="radio" value="Property Damage" name="claimType" />{" "}
-            <i class="fas fa-house-damage fa-5x"></i> Propery Damage
-            <input type="radio" value="Water Damage" name="claimType" />{" "}
-            <i class="fas fa-faucet fa-5x"></i> Water Damage
-            <input type="radio" value="Fire Damage" name="claimType" />{" "}
-            <i class="fas fa-fire fa-5x"></i> Fire Damage
-            <input type="radio" value="Robbery" name="claimType" />{" "}
-            <i class="fas fa-mask fa-5x"></i> Robbery
-            <input type="radio" value="Other" name="claimType" />{" "}
-            <i class="fas fa-plus fa-5x"></i> Other
+            <div className="CarInsuranceIcon">
+              <i class="fas fa-house-damage fa-5x"></i>
+              <input type="radio" name="collision" hidden="" />
+            </div>
+            <h2>Property Damage</h2>
+          </div>
+          <div className="CarInsurance">
+            <div className="CarInsuranceIcon">
+              <i class="fas fa-faucet fa-5x"></i>
+              <input type="radio" name="hail" hidden="" />
+            </div>
+            <h2>Water Damage</h2>
+          </div>
+          <div className="CarInsurance">
+            <div className="CarInsuranceIcon">
+              <i class="fas fa-fire fa-5x"></i>
+              <input type="radio" name="hitandrun" hidden="" />
+            </div>
+            <h2>Fire Damage</h2>
+          </div>
+          <div className="CarInsurance">
+            <div className="CarInsuranceIcon">
+              <i class="fas fa-plus fa-5x"></i>
+              <input type="radio" name="theft" hidden="" />
+            </div>
+            <h2>Theft</h2>
           </div>
         </div>
       </div>
