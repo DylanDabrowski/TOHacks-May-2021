@@ -5,13 +5,15 @@
   z-index: 1;
   top: 0;
   left: 0;
-  background-color: #dfdddd;
+  background: transparent linear-gradient(35deg, #007b87 0%, #128aa0 100%) 0% 0%;
   transition: 0.5s ease;
   overflow-x: hidden;
   padding-top: 20px;
   display: flex;
   flex-direction: column;
   align-items: center;
+  font-family: "Inter", sans-serif;
+  font-weight: bold;
 }
 
 .sidenav-container {
@@ -22,7 +24,7 @@
 }
 
 .sidenav-links {
-  color: rgb(0, 0, 0);
+  color: white;
   text-decoration: none;
   padding: 0.5rem 1rem;
   font-size: large;
