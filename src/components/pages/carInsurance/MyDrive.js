@@ -17,12 +17,6 @@ function MyDrive() {
     });
   };
 
-<<<<<<< HEAD
-
-useEffect(() => {
-  fetchInfo();
-}, []);
-=======
   const fetchImageInfo = async () => {
     const imgResponse = db
       .storage()
@@ -32,7 +26,6 @@ useEffect(() => {
       setImage([...dbImage.dbImage.data()]);
     });
   };
->>>>>>> 5caebf34b1ed1d27a4818fd426cc434ea7595c44
 
   useEffect(() => {
     fetchInfo();
