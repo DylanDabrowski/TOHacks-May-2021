@@ -5,6 +5,7 @@ body {
   margin: 0;
   padding: 0;
   border: 0;
+  font-family: Arial, Helvetica, sans-serif;
 }
 
 html {
@@ -25,7 +26,6 @@ body {
   display: inline;
   float: left;
 
-  /* UI Properties */
   background: transparent linear-gradient(35deg, #007b87 0%, #128aa0 100%) 0% 0%;
 }
 
@@ -36,9 +36,9 @@ body {
   justify-content: center;
 }
 
-/* .container {
+.container {
   text-align: center;
-} */
+}
 
 .form1 {
   width: 100%;
@@ -89,9 +89,7 @@ body {
   width: 100%;
 }
 
-button,
-input[type="submit"],
-input[type="reset"] {
+button {
   border: none;
   padding: 0;
   font: inherit;
@@ -108,11 +106,6 @@ input[type="reset"] {
   color: white;
   font-size: 28px;
   background-color: #007b87;
-}
-
-body {
-  font-family: Arial;
-  color: white;
 }
 
 .split {
