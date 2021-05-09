@@ -1,0 +1,142 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+html {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+.leftBar {
+  width: 40%;
+  height: 100vh;
+  flex: 1;
+  flex-direction: "row";
+  display: inline;
+  float: left;
+
+  background: transparent linear-gradient(35deg, #007b87 0%, #128aa0 100%) 0% 0%;
+}
+
+.rightBar {
+  display: inline;
+  width: 60%;
+  float: right;
+  justify-content: center;
+}
+
+.container {
+  text-align: center;
+}
+
+.form1 {
+  width: 100%;
+}
+
+.pText {
+  color: black;
+  margin-top: 100px;
+  text-align: start;
+  margin-left: 20px;
+  font-size: 20px;
+}
+
+.whiteTitle {
+  margin: 70px;
+  margin-top: 150px;
+  text-align: start;
+  font-size: 58px;
+  color: white;
+  font-family: "Inter", Helvetica, Arial, sans-serif;
+}
+
+.title1 {
+  color: #4e4e4e;
+  text-align: left;
+  margin-left: 10px;
+  margin-top: 150px;
+  font-size: 45px;
+}
+
+.truckImg {
+  margin-top: 150px;
+}
+
+.textInput {
+  display: block;
+  width: 100%;
+  padding-top: 20px;
+  padding-bottom: 20px;
+  border-radius: 20px;
+}
+
+.signin {
+  margin: 80px;
+}
+
+.holder {
+  width: 100%;
+}
+
+button {
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  outline: inherit;
+}
+
+.signInBtn {
+  width: 100%;
+  padding-top: 20px;
+  padding-bottom: 20px;
+  margin-top: 100px;
+  border-radius: 20px;
+  color: white;
+  font-size: 28px;
+  background-color: #007b87;
+}
+
+.split {
+  height: 100%;
+  width: 50%;
+  position: fixed;
+  z-index: 1;
+  top: 0;
+  overflow-x: hidden;
+  padding-top: 20px;
+}
+
+.left {
+  left: 0;
+  background-color: #111;
+}
+
+.right {
+  right: 0;
+  background-color: red;
+}
+
+.centered {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+
+.centered img {
+  width: 150px;
+  border-radius: 50%;
+}
