@@ -1,0 +1,92 @@
+body {
+  background-color: #f2f2f2;
+}
+
+.mainSelectionContainer {
+  display: flex;
+  justify-content: center;
+  margin-top: 12vh;
+}
+
+.selectionContainer {
+  background-color: #fff;
+  border-radius: 20px;
+  width: 70%;
+  height: 70vh;
+  margin: 0 auto;
+  box-shadow: 0 6px 6px rgba(0, 0, 0, 0.2);
+}
+
+.autoText {
+  text-align: left;
+  margin-left: 50px;
+  margin-top: 50px;
+  color: #5e5e5e;
+}
+
+.choiceHolder {
+  display: flex;
+  flex-direction: "row";
+  margin: 50px;
+}
+
+.autoSelection {
+  flex: 1;
+  background: lightgray;
+  border: 5px solid #5e5e5e;
+  height: 80%;
+  margin-right: 40px;
+  margin-left: 40px;
+  border-radius: 40px;
+}
+
+.autoSelection:hover {
+  background: transparent linear-gradient(35deg, #007b87 0%, #128aa0 100%) 0% 0%;
+}
+
+.homeSelection {
+  flex: 1;
+  background: grey;
+  background: lightgray;
+  border: 5px solid #5e5e5e;
+  height: 80%;
+  margin-left: 40px;
+  margin-right: 40px;
+  border-radius: 40px;
+}
+
+.homeSelection:hover {
+  background: transparent linear-gradient(35deg, #007b87 0%, #128aa0 100%) 0% 0%;
+}
+
+.homeSelection .fas {
+  display: block;
+}
+
+.autoSelection .fas {
+  display: block;
+}
+
+.homeChoice {
+  margin: 160px;
+}
+
+.autoChoice {
+  margin: 160px;
+}
+
+.fa-car {
+  color: white;
+}
+
+.fa-home {
+  color: white;
+}
+
+.whiteTitle {
+  margin: 30px;
+  font-size: 58px;
+  color: white;
+  text-align: center;
+  font-family: "Inter", Helvetica, Arial, sans-serif;
+}

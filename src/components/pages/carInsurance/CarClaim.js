@@ -40,34 +40,16 @@ function CarClaim() {
         </div>
       </div>
       <div>
-        <h2>Which vehicle would you like to make a claim for?</h2>
+        <h2>Which vehicle would you like to maake a claim for?</h2>
         <input type="text" id="vehicle" name="vehicle" />
+        <input type="submit" value="Submit" />
       </div>
       <div>
         <h2>Who is the primary driver of the vehicle?</h2>
         <input type="text" id="owner" name="owner" />
+        <input type="submit" value="Submit" />
       </div>
-      <div>
-        <h2>What time did the collision occur?</h2>
-        <input type="text" id="time" name="time" />
-      </div>
-      <div>
-        <h2>Where did the collision occur?</h2>
-        <input type="text" id="location" name="location" />
-      </div>
-      <div>
-        <h2>Who was driving the vehicle?</h2>
-        <input type="text" id="driver" name="driver" />
-      </div>
-      <div>
-        <h2>What is the severity of collision?</h2>
-        <input type="text" id="severity" name="severity" />
-      </div>
-      <div>
-        <h2>Additional Info</h2>
-        <input type="textarea" id="additional" name="additional" />
-      </div>
-      <input type="submit" value="Submit" />
+      <a>Next Page</a>
     </div>
   );
 }

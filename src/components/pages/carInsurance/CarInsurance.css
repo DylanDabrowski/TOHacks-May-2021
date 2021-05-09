@@ -1,16 +1,16 @@
-.CarInsurance { 
-    width:120px;
-    height:200px;
-    padding:10px;
-    margin:20px;
-    display:inline-block;
-    vertical-align: top;
+.CarInsurance {
+  width: 120px;
+  height: 200px;
+  padding: 10px;
+  margin: 20px;
+  display: inline-block;
+  vertical-align: top;
 }
 
 .CarInsuranceIcon {
-    border:1px solid black;
-    border-radius: 25px;
-    padding:10px;
-    width: 100px;
-    background-color: lightgray;
+  border: 1px solid black;
+  border-radius: 25px;
+  padding: 10px;
+  width: 100px;
+  background-color: lightgray;
 }
