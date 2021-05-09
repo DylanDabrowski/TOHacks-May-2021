@@ -38,7 +38,6 @@ useEffect(() => {
           info && info.map(inf => {
             return(
               <div>
-            <h4>{inf.score}</h4>
             <SideNav className="navBar" />
             <div className="row">
               <div className="column">
@@ -57,21 +56,21 @@ useEffect(() => {
             <div className="row">
               <div className="column">
                 <h2>Harsh Breaking</h2>
-                <h1 className="results-box-bad">-5%</h1>
+                <h1 className="results-box-bad">{inf.harshNumber}</h1>
                 <h3>{inf.harshBreaking}</h3>
               </div>
               <div className="column">
                 <h2>Speed</h2>
-                <h1 className="results-box-good">+10%</h1>
+                <h1 className="results-box-good">{inf.speedNumber}</h1>
                 <h3>
                   Congratulations, you have exceeded the speed limit 0 times this
                   week
                 </h3>
               </div>
               <div className="column">
-                <h2>Harsh Breaking</h2>
-                <h1 className="results-box-good">+16%</h1>
-                <h3>Congratulations, you have maintained focus this week</h3>
+                <h2>Focus</h2>
+                <h1 className="results-box-good">{inf.focusNum}</h1>
+                <h3>{inf.focus}</h3>
               </div>
             </div>
           </div>
