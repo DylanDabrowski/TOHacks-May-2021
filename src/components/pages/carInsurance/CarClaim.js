@@ -66,12 +66,10 @@ export default function CarClaim() {
         <div>
           <h2>Which vehicle would you like to maake a claim for?</h2>
           <input type="text" id="vehicle" name="vehicle" />
-          <input type="submit" value="Submit" />
         </div>
         <div>
           <h2>Who is the primary driver of the vehicle?</h2>
           <input type="text" id="owner" name="owner" />
-          <input type="submit" value="Submit" />
         </div>
         <div>
           <h2>What time did the collision occur?</h2>
