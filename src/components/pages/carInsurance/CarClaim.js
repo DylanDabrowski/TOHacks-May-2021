@@ -37,21 +37,21 @@ export default function CarClaim() {
           <div className="CarInsurance">
             <div className="CarInsuranceIcon">
               <i class="fas fa-car-crash fa-5x"></i>
-              <input type="radio" name="collision" hidden="" />
+              <input type="radio" value="Collision" name="claim-type" />
             </div>
             <h2>Collision</h2>
           </div>
           <div className="CarInsurance">
             <div className="CarInsuranceIcon">
               <i class="fas fa-cloud-showers-heavy fa-5x"></i>
-              <input type="radio" name="hail" hidden="" />
+              <input type="radio" value="Hail" name="claim-type" />
             </div>
             <h2>Hail</h2>
           </div>
           <div className="CarInsurance">
             <div className="CarInsuranceIcon">
               <i class="fas fa-shipping-fast fa-5x"></i>
-              <input type="radio" name="hitandrun" hidden="" />
+              <input type="radio" value="Hit And Run" name="claim-type" />
             </div>
             <h2>Hit & Run</h2>
           </div>

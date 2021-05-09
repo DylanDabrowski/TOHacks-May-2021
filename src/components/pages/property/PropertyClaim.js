@@ -13,28 +13,28 @@ function PropertyClaim() {
           <div className="CarInsurance">
             <div className="CarInsuranceIcon">
               <i class="fas fa-house-damage fa-5x"></i>
-              <input type="radio" name="collision" hidden="" />
+              <input type="radio" value="Property Damage" name="claim-type" />
             </div>
             <h2>Property Damage</h2>
           </div>
           <div className="CarInsurance">
             <div className="CarInsuranceIcon">
               <i class="fas fa-faucet fa-5x"></i>
-              <input type="radio" name="hail" hidden="" />
+              <input type="radio" value="Water Damage" name="claim-type" />
             </div>
             <h2>Water Damage</h2>
           </div>
           <div className="CarInsurance">
             <div className="CarInsuranceIcon">
               <i class="fas fa-fire fa-5x"></i>
-              <input type="radio" name="hitandrun" hidden="" />
+              <input type="radio" value="Fire Damage" name="claim-type" />
             </div>
             <h2>Fire Damage</h2>
           </div>
           <div className="CarInsurance">
             <div className="CarInsuranceIcon">
-              <i class="fas fa-plus fa-5x"></i>
-              <input type="radio" name="theft" hidden="" />
+              <i class="fas fa-mask fa-5x"></i>
+              <input type="radio" value="Theft" name="claim-type" />
             </div>
             <h2>Theft</h2>
           </div>
