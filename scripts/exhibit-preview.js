@@ -393,7 +393,7 @@ function detectFramework() {
       return {
         id: override,
         exts: [".tsx", ".jsx", ".ts", ".js"],
-        supported: canResolve("react") && canResolve("react-dom/client"),
+        supported: canResolve("react") && canResolve("react-dom"),
         reason: `Framework override: ${override}`,
       };
     }
@@ -433,7 +433,7 @@ function detectFramework() {
     return {
       id: "next",
       exts: [".tsx", ".jsx", ".ts", ".js"],
-      supported: canResolve("react") && canResolve("react-dom/client"),
+      supported: canResolve("react") && canResolve("react-dom"),
       reason: "Next.js",
     };
   }
@@ -441,7 +441,7 @@ function detectFramework() {
     return {
       id: "react",
       exts: [".tsx", ".jsx", ".ts", ".js"],
-      supported: canResolve("react") && canResolve("react-dom/client"),
+      supported: canResolve("react") && canResolve("react-dom"),
       reason: "React",
     };
   }
@@ -507,7 +507,7 @@ function detectFramework() {
     return {
       id: "react",
       exts: [".tsx", ".jsx", ".ts", ".js"],
-      supported: canResolve("react") && canResolve("react-dom/client"),
+      supported: canResolve("react") && canResolve("react-dom"),
       reason: "React files detected",
     };
   }
@@ -2045,12 +2045,12 @@ if (root) {
 `
     : `${globalImport}import "./preview-env";
 import React from "react";
-import { createRoot } from "react-dom/client";
+import * as ReactDOM from "react-dom";
 import App from "./preview-app";
 
 const root = document.getElementById("root");
 if (root) {
-  createRoot(root).render(<App />);
+  ReactDOM.render(<App />, root);
 }
 `;
   fs.writeFileSync(path.join(srcDir, mainEntry), mainSource);
@@ -2558,13 +2558,13 @@ if (root) {
 `
     : `import "./bundle-env";
 import React from "react";
-import { createRoot } from "react-dom/client";
+import * as ReactDOM from "react-dom";
 import BundleApp from "./bundle-app";
 import "./bundle-global.css";
 
 const root = document.getElementById("root");
 if (root) {
-  createRoot(root).render(<BundleApp />);
+  ReactDOM.render(<BundleApp />, root);
 }
 `;
   fs.writeFileSync(path.join(bundleDir, bundleMainEntry), bundleMainSource);
