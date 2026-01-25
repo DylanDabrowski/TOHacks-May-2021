@@ -392,7 +392,7 @@ function detectFramework() {
     if (override === "react" || override === "next") {
       return {
         id: override,
-        exts: [".tsx", ".jsx"],
+        exts: [".tsx", ".jsx", ".ts", ".js"],
         supported: canResolve("react") && canResolve("react-dom/client"),
         reason: `Framework override: ${override}`,
       };
@@ -432,7 +432,7 @@ function detectFramework() {
   if (has("next")) {
     return {
       id: "next",
-      exts: [".tsx", ".jsx"],
+      exts: [".tsx", ".jsx", ".ts", ".js"],
       supported: canResolve("react") && canResolve("react-dom/client"),
       reason: "Next.js",
     };
@@ -440,7 +440,7 @@ function detectFramework() {
   if (has("react")) {
     return {
       id: "react",
-      exts: [".tsx", ".jsx"],
+      exts: [".tsx", ".jsx", ".ts", ".js"],
       supported: canResolve("react") && canResolve("react-dom/client"),
       reason: "React",
     };
@@ -506,7 +506,7 @@ function detectFramework() {
   if (hasFiles(".tsx") || hasFiles(".jsx")) {
     return {
       id: "react",
-      exts: [".tsx", ".jsx"],
+      exts: [".tsx", ".jsx", ".ts", ".js"],
       supported: canResolve("react") && canResolve("react-dom/client"),
       reason: "React files detected",
     };
@@ -514,7 +514,7 @@ function detectFramework() {
 
   return {
     id: "unknown",
-    exts: [".tsx", ".jsx", ".vue", ".svelte", ".astro"],
+    exts: [".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte", ".astro"],
     supported: false,
     reason: "Unsupported framework",
   };
