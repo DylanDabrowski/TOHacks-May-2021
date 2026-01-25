@@ -1,0 +1,3295 @@
+#!/usr/bin/env node
+import fs from "fs";
+import path from "path";
+import { spawn } from "child_process";
+import { fileURLToPath } from "url";
+import { createRequire } from "module";
+import { chromium } from "playwright";
+import zlib from "zlib";
+import { getFrameworkAdapter } from "./exhibit/adapters/index.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const require = createRequire(import.meta.url);
+const ROOT = process.cwd();
+const PREVIEW_DIR = path.join(ROOT, ".exhibit-preview");
+const PREVIEW_PORT = 4173;
+const PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}`;
+const PREVIEW_UPLOAD_URL = process.env.PREVIEW_UPLOAD_URL;
+const PREVIEW_UPLOAD_TOKEN = process.env.PREVIEW_UPLOAD_TOKEN;
+const REPO_FULL_NAME = process.env.GITHUB_REPOSITORY;
+const COMMIT_SHA = process.env.GITHUB_SHA;
+const UPLOAD_BATCH_SIZE = Number(process.env.PREVIEW_UPLOAD_BATCH_SIZE || "25");
+const PREVIEW_INTERACTIVE = process.env.PREVIEW_INTERACTIVE !== "0";
+const PREVIEW_BUNDLE_GZIP_THRESHOLD = Number(
+  process.env.PREVIEW_BUNDLE_GZIP_THRESHOLD || "0",
+);
+const PREVIEW_AUTO_INSTALL_DEPS =
+  process.env.PREVIEW_AUTO_INSTALL_DEPS !== "0";
+const FRAMEWORK_OVERRIDE_RAW =
+  process.env.EXHIBIT_FRAMEWORK || process.env.PREVIEW_FRAMEWORK || "";
+const FRAMEWORK_OVERRIDE = FRAMEWORK_OVERRIDE_RAW.trim().toLowerCase();
+const SCRIPT_VERSION = "preview-script-v55";
+
+if (!PREVIEW_UPLOAD_URL || !PREVIEW_UPLOAD_TOKEN) {
+  console.error("Missing PREVIEW_UPLOAD_URL or PREVIEW_UPLOAD_TOKEN");
+  process.exit(1);
+}
+
+console.log(`Exhibit preview script: ${SCRIPT_VERSION}`);
+function describeUploadUrl(value) {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return value;
+  }
+}
+console.log(`Preview upload URL: ${describeUploadUrl(PREVIEW_UPLOAD_URL)}`);
+if (REPO_FULL_NAME) {
+  console.log(`Repository: ${REPO_FULL_NAME}`);
+}
+if (COMMIT_SHA) {
+  console.log(`Commit: ${COMMIT_SHA}`);
+}
+console.log(`Upload batch size: ${UPLOAD_BATCH_SIZE}`);
+console.log(`Interactive previews: ${PREVIEW_INTERACTIVE ? "enabled" : "disabled"}`);
+
+const ignoredDirs = new Set([
+  "node_modules",
+  ".git",
+  ".next",
+  "dist",
+  "build",
+  "out",
+  ".exhibit-preview",
+]);
+
+const PREVIEW_CONFIG_CANDIDATES = [
+  "exhibit.preview.json",
+  ".exhibit/preview.json",
+  ".exhibit/preview.props.json",
+];
+
+function normalizeComponentPath(value) {
+  const normalized = toPosixPath(value);
+  return normalized.startsWith("./") ? normalized.slice(2) : normalized;
+}
+
+function loadPreviewConfig() {
+  for (const rel of PREVIEW_CONFIG_CANDIDATES) {
+    const full = path.join(ROOT, rel);
+    if (!fs.existsSync(full)) continue;
+    try {
+      const raw = fs.readFileSync(full, "utf8");
+      const cleaned = stripJsonTrailingCommas(stripJsonComments(raw));
+      const parsed = JSON.parse(cleaned);
+      if (parsed && typeof parsed === "object") {
+        const components =
+          parsed.components && typeof parsed.components === "object"
+            ? parsed.components
+            : parsed;
+        const settings =
+          parsed.settings && typeof parsed.settings === "object"
+            ? parsed.settings
+            : null;
+        return { source: rel, components, settings };
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`Preview config parse failed (${rel}): ${message}`);
+    }
+  }
+  return null;
+}
+
+function getPreviewPropsForPath(config, componentPath) {
+  if (!config?.components) return null;
+  const normalized = normalizeComponentPath(componentPath);
+  const direct =
+    config.components[normalized] ||
+    config.components[`./${normalized}`] ||
+    config.components[componentPath];
+  if (!direct || typeof direct !== "object") return null;
+  if ("props" in direct && typeof direct.props === "object") {
+    return direct.props;
+  }
+  return direct;
+}
+
+function getPreviewSettings(config) {
+  const settings = config?.settings || {};
+  const normalizeList = (value) =>
+    Array.isArray(value)
+      ? value.filter((entry) => typeof entry === "string" && entry.trim())
+      : [];
+  const normalizeModuleAliases = (value) => {
+    const entries = [];
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (!entry || typeof entry !== "object") continue;
+        if (typeof entry.find !== "string" || typeof entry.replacement !== "string")
+          continue;
+        entries.push({ find: entry.find, replacement: entry.replacement });
+      }
+    } else if (value && typeof value === "object") {
+      for (const [find, replacement] of Object.entries(value)) {
+        if (typeof replacement !== "string") continue;
+        entries.push({ find, replacement });
+      }
+    }
+    return entries
+      .map((entry) => ({
+        find: entry.find,
+        replacement: resolveAliasReplacement(entry.replacement),
+      }))
+      .filter((entry) => Boolean(entry.replacement));
+  };
+  return {
+    componentRoots: normalizeList(settings.componentRoots),
+    include: normalizeList(settings.include),
+    exclude: normalizeList(settings.exclude),
+    skipServerComponents: settings.skipServerComponents !== false,
+    wrapper: resolveWrapperSpec(settings.wrapper),
+    moduleAliases: normalizeModuleAliases(settings.moduleAliases),
+    stubModules: normalizeList(settings.stubModules),
+  };
+}
+
+function resolveWrapperSpec(value) {
+  if (!value || typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const resolved = path.isAbsolute(trimmed)
+    ? trimmed
+    : path.join(ROOT, trimmed);
+  if (fs.existsSync(resolved)) {
+    return {
+      preview: toFsImportPath(resolved),
+      bundle: resolved,
+      display: resolved,
+    };
+  }
+  return {
+    preview: trimmed,
+    bundle: trimmed,
+    display: trimmed,
+  };
+}
+
+function resolveAliasReplacement(value) {
+  if (!value || typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("virtual:")) return trimmed;
+  const resolved = path.isAbsolute(trimmed)
+    ? trimmed
+    : path.join(ROOT, trimmed);
+  if (fs.existsSync(resolved)) {
+    return resolved;
+  }
+  return trimmed;
+}
+
+function patternToRegex(pattern) {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*/g, ".*")
+    .replace(/\*/g, "[^/]*");
+  return new RegExp(`^${escaped}$`);
+}
+
+function matchesPattern(value, patterns) {
+  if (!patterns || patterns.length === 0) return false;
+  const normalized = normalizeComponentPath(value);
+  return patterns.some((pattern) => patternToRegex(pattern).test(normalized));
+}
+
+function walk(dir) {
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith(".")) continue;
+    if (entry.isDirectory() && ignoredDirs.has(entry.name)) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...walk(full));
+    else files.push(full);
+  }
+  return files;
+}
+
+function readPackageJson() {
+  try {
+    const content = fs.readFileSync(path.join(ROOT, "package.json"), "utf8");
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+function hasDependency(dep) {
+  const pkg = readPackageJson();
+  return Boolean(pkg?.dependencies?.[dep] || pkg?.devDependencies?.[dep]);
+}
+
+function canResolve(dep) {
+  try {
+    require.resolve(dep, { paths: [ROOT] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function detectPackageManager() {
+  const hasFile = (name) => fs.existsSync(path.join(ROOT, name));
+  if (hasFile("pnpm-lock.yaml")) return "pnpm";
+  if (hasFile("yarn.lock")) return "yarn";
+  if (hasFile("package-lock.json")) return "npm";
+  return "npm";
+}
+
+const installSummaries = [];
+
+async function installDeps(pkgs) {
+  if (pkgs.length === 0) return;
+  const pm = detectPackageManager();
+  const command = process.platform === "win32" ? "npm.cmd" : "npm";
+  const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+  const yarnCommand = process.platform === "win32" ? "yarn.cmd" : "yarn";
+  const summary = {
+    packages: [...pkgs],
+    manager: pm,
+    args: [],
+    success: false,
+    error: null,
+  };
+  try {
+    if (pm === "pnpm") {
+      summary.args = ["add", "-D", ...pkgs];
+      await runCommand(pnpmCommand, summary.args, { cwd: ROOT });
+      summary.success = true;
+      summary.error = null;
+      installSummaries.push(summary);
+      return;
+    }
+    if (pm === "yarn") {
+      summary.args = ["add", "-D", ...pkgs];
+      await runCommand(yarnCommand, summary.args, { cwd: ROOT });
+      summary.success = true;
+      summary.error = null;
+      installSummaries.push(summary);
+      return;
+    }
+  } catch (err) {
+    summary.error = err instanceof Error ? err.message : String(err);
+    console.warn(`Dependency install failed with ${pm}, falling back to npm.`);
+  }
+  summary.manager = "npm";
+  const npmEnv = {
+    ...process.env,
+    NODE_ENV: "development",
+    NPM_CONFIG_PRODUCTION: "false",
+    NPM_CONFIG_OMIT: "",
+    NPM_CONFIG_INCLUDE: "dev",
+    NPM_CONFIG_PRUNE: "false",
+  };
+  try {
+    summary.args = [
+      "install",
+      "--no-save",
+      "--no-package-lock",
+      "--no-fund",
+      "--no-audit",
+      "--include=dev",
+      "--production=false",
+      ...pkgs,
+    ];
+    await runCommand(command, summary.args, { cwd: ROOT, env: npmEnv });
+    summary.success = true;
+    summary.error = null;
+    installSummaries.push(summary);
+  } catch {
+    summary.args = [
+      "install",
+      "--no-save",
+      "--no-package-lock",
+      "--no-fund",
+      "--no-audit",
+      "--include=dev",
+      "--production=false",
+      "--legacy-peer-deps",
+      ...pkgs,
+    ];
+    try {
+      await runCommand(command, summary.args, { cwd: ROOT, env: npmEnv });
+      summary.success = true;
+      summary.error = null;
+      installSummaries.push(summary);
+    } catch (err) {
+      summary.error = err instanceof Error ? err.message : String(err);
+      installSummaries.push(summary);
+      throw err;
+    }
+  }
+}
+
+async function ensureRuntimeDeps(framework, globalCssPath) {
+  if (!PREVIEW_AUTO_INSTALL_DEPS) return;
+  const required = [];
+  const shouldInstall = (dep) => !canResolve(dep) || !hasDependency(dep);
+  const needsPlaywright =
+    !canResolve("playwright") ||
+    !canResolve("playwright/package.json") ||
+    !hasDependency("playwright");
+  if (framework.id === "react" || framework.id === "next") {
+    if (shouldInstall("react")) required.push("react");
+    if (shouldInstall("react-dom")) required.push("react-dom");
+    if (shouldInstall("vite")) required.push("vite");
+    if (shouldInstall("@vitejs/plugin-react")) {
+      required.push("@vitejs/plugin-react");
+    }
+  }
+  if (framework.id === "vue") {
+    if (shouldInstall("vue")) required.push("vue");
+    if (shouldInstall("vite")) required.push("vite");
+    if (shouldInstall("@vitejs/plugin-vue")) required.push("@vitejs/plugin-vue");
+  }
+  const tailwindConfig = getTailwindConfigPath();
+  const tailwindMajor = getTailwindMajorVersion(globalCssPath);
+  const usesTailwind =
+    Boolean(tailwindConfig) ||
+    globalCssHasTailwind(globalCssPath) ||
+    tailwindMajor !== null;
+  if (usesTailwind) {
+    if (shouldInstall("tailwindcss")) required.push("tailwindcss");
+    if (shouldInstall("postcss")) required.push("postcss");
+    if (shouldInstall("autoprefixer")) required.push("autoprefixer");
+    if (tailwindMajor && tailwindMajor >= 4) {
+      if (shouldInstall("@tailwindcss/postcss")) {
+        required.push("@tailwindcss/postcss");
+      }
+    }
+  }
+  if (needsPlaywright) {
+    required.push("playwright");
+  }
+  if (required.length === 0) return;
+  console.log(`Installing missing runtime deps: ${required.join(", ")}`);
+  await installDeps(required);
+}
+
+function normalizeFrameworkOverride(value) {
+  if (!value) return null;
+  if (value === "nextjs") return "next";
+  if (value === "reactjs") return "react";
+  return value;
+}
+
+function detectFramework() {
+  const override = normalizeFrameworkOverride(FRAMEWORK_OVERRIDE);
+  if (override) {
+    if (override === "react" || override === "next") {
+      return {
+        id: override,
+        exts: [".tsx", ".jsx"],
+        supported: canResolve("react") && canResolve("react-dom/client"),
+        reason: `Framework override: ${override}`,
+      };
+    }
+    if (override === "vue") {
+      return {
+        id: "vue",
+        exts: [".vue"],
+        supported: canResolve("vue") && canResolve("@vitejs/plugin-vue"),
+        reason: "Framework override: vue",
+      };
+    }
+    if (override === "svelte") {
+      return {
+        id: "svelte",
+        exts: [".svelte"],
+        supported: false,
+        reason: "Framework override: svelte",
+      };
+    }
+    if (override === "astro") {
+      return {
+        id: "astro",
+        exts: [".astro"],
+        supported: false,
+        reason: "Framework override: astro",
+      };
+    }
+  }
+  const pkg = readPackageJson();
+  const deps = {
+    ...(pkg?.dependencies || {}),
+    ...(pkg?.devDependencies || {}),
+  };
+  const has = (name) => Boolean(deps[name]);
+
+  if (has("next")) {
+    return {
+      id: "next",
+      exts: [".tsx", ".jsx"],
+      supported: canResolve("react") && canResolve("react-dom/client"),
+      reason: "Next.js",
+    };
+  }
+  if (has("react")) {
+    return {
+      id: "react",
+      exts: [".tsx", ".jsx"],
+      supported: canResolve("react") && canResolve("react-dom/client"),
+      reason: "React",
+    };
+  }
+  if (has("vue")) {
+    const supported = canResolve("vue") && canResolve("@vitejs/plugin-vue");
+    return {
+      id: "vue",
+      exts: [".vue"],
+      supported,
+      reason: supported
+        ? "Vue"
+        : "Vue runtime dependencies are missing. Install vue and @vitejs/plugin-vue.",
+    };
+  }
+  if (has("svelte")) {
+    return {
+      id: "svelte",
+      exts: [".svelte"],
+      supported: false,
+      reason: "Svelte adapter not implemented yet",
+    };
+  }
+  if (has("astro")) {
+    return {
+      id: "astro",
+      exts: [".astro"],
+      supported: false,
+      reason: "Astro adapter not implemented yet",
+    };
+  }
+  const hasFiles = (extension) =>
+    fs.existsSync(ROOT) &&
+    walk(ROOT).some((filePath) => filePath.endsWith(extension));
+
+  if (hasFiles(".astro")) {
+    return {
+      id: "astro",
+      exts: [".astro"],
+      supported: false,
+      reason: "Astro adapter not implemented yet",
+    };
+  }
+  if (hasFiles(".svelte")) {
+    return {
+      id: "svelte",
+      exts: [".svelte"],
+      supported: false,
+      reason: "Svelte adapter not implemented yet",
+    };
+  }
+  if (hasFiles(".vue")) {
+    const supported = canResolve("vue") && canResolve("@vitejs/plugin-vue");
+    return {
+      id: "vue",
+      exts: [".vue"],
+      supported,
+      reason: supported
+        ? "Vue files detected"
+        : "Vue runtime dependencies are missing. Install vue and @vitejs/plugin-vue.",
+    };
+  }
+  if (hasFiles(".tsx") || hasFiles(".jsx")) {
+    return {
+      id: "react",
+      exts: [".tsx", ".jsx"],
+      supported: canResolve("react") && canResolve("react-dom/client"),
+      reason: "React files detected",
+    };
+  }
+
+  return {
+    id: "unknown",
+    exts: [".tsx", ".jsx", ".vue", ".svelte", ".astro"],
+    supported: false,
+    reason: "Unsupported framework",
+  };
+}
+
+let FRAMEWORK = detectFramework();
+let exts = FRAMEWORK.exts;
+const aliasCandidates = [
+  { find: "next/link", file: "stubs/next-link.tsx" },
+  { find: "next/image", file: "stubs/next-image.tsx" },
+  { find: "next/navigation", file: "stubs/next-navigation.ts" },
+  { find: "next/router", file: "stubs/next-router.ts" },
+  { find: "next/head", file: "stubs/next-head.tsx" },
+  { find: ".prisma/client/index-browser", file: "stubs/prisma-client.ts" },
+  { find: "@prisma/client", file: "stubs/prisma-client.ts" },
+  { find: "@t3-oss/env-nextjs", file: "stubs/env.ts" },
+  { find: "@t3-oss/env-core", file: "stubs/env.ts" },
+  { find: "@clerk/nextjs", file: "stubs/clerk.tsx" },
+  { find: "@clerk/clerk-react", file: "stubs/clerk.tsx" },
+  { find: "convex/react", file: "stubs/convex-react.tsx" },
+  { find: "convex/react-clerk", file: "stubs/convex-react-clerk.tsx" },
+  { find: "@/convex/_generated/api", file: "stubs/convex-api.ts" },
+  { find: "@liveblocks/react", file: "stubs/liveblocks-react.tsx" },
+  { find: "@liveblocks/client", file: "stubs/liveblocks-client.ts" },
+  { find: "@/liveblocks.config", file: "stubs/liveblocks-config.tsx" },
+  { find: "@trpc/react-query", file: "stubs/trpc-react.ts" },
+  { find: "@trpc/react-query/ssg", file: "stubs/trpc-react-ssg.ts" },
+  { find: "@trpc/next", file: "stubs/trpc-next.ts" },
+  { find: "@trpc/client", file: "stubs/trpc-client.ts" },
+  { find: "@trpc/server", file: "stubs/trpc-server.ts" },
+  { find: "~/utils/api", file: "stubs/api.ts" },
+  { find: "@/utils/api", file: "stubs/api.ts" },
+  { find: "env.mjs", file: "stubs/env.ts" },
+];
+
+
+function getComponentRoots(overrides) {
+  if (overrides && overrides.length > 0) {
+    return overrides
+      .map((rel) => path.join(ROOT, rel))
+      .filter((full) => fs.existsSync(full));
+  }
+  const candidates = [
+    "src/components",
+    "src/app/components",
+    "src/app/components/ui",
+    "src/app/ui",
+    "src/ui",
+    "components",
+    "app/components",
+    "app/ui",
+    "ui",
+  ];
+  return candidates
+    .map((rel) => path.join(ROOT, rel))
+    .filter((full) => fs.existsSync(full));
+}
+
+function shouldSkipComponent(filePath, settings) {
+  if (!settings?.skipServerComponents) return false;
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    if (/["']use server["']/.test(raw)) return true;
+    if (/from\s+["']next\/headers["']/.test(raw)) return true;
+    if (/from\s+["']next\/server["']/.test(raw)) return true;
+    if (/from\s+["']next\/cache["']/.test(raw)) return true;
+    if (/from\s+["']next\/cookies["']/.test(raw)) return true;
+    if (/from\s+["']next\/font\//.test(raw)) return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function findComponents(settings) {
+  const roots = getComponentRoots(settings?.componentRoots);
+  const files = roots.length > 0 ? roots.flatMap((root) => walk(root)) : walk(ROOT);
+  const unique = new Set();
+  const skipped = [];
+  for (const file of files) {
+    const ext = path.extname(file).toLowerCase();
+    if (!exts.includes(ext)) continue;
+    const baseName = path.basename(file).toLowerCase();
+    if (baseName.includes(".preview.")) continue;
+    const rel = path.relative(ROOT, file).replace(/\\/g, "/");
+    if (settings?.include?.length && !matchesPattern(rel, settings.include)) {
+      continue;
+    }
+    if (settings?.exclude?.length && matchesPattern(rel, settings.exclude)) {
+      continue;
+    }
+    if (shouldSkipComponent(file, settings)) {
+      skipped.push(rel);
+      continue;
+    }
+    unique.add(file);
+  }
+  return { files: Array.from(unique), skipped };
+}
+
+function findPreviewCompanion(filePath) {
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  const dot = base.lastIndexOf(".");
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  const candidates = [
+    `${stem}.preview.tsx`,
+    `${stem}.preview.jsx`,
+    `${stem}.preview.ts`,
+    `${stem}.preview.js`,
+  ];
+  for (const candidate of candidates) {
+    const full = path.join(dir, candidate);
+    if (fs.existsSync(full)) return full;
+  }
+  return null;
+}
+
+function inferAutoPreviewType(content) {
+  const haystack = content.toLowerCase();
+  if (haystack.includes("alertdialog") || haystack.includes("react-alert-dialog")) {
+    return "alert-dialog";
+  }
+  if (haystack.includes("tooltip") || haystack.includes("react-tooltip")) {
+    return "tooltip";
+  }
+  if (haystack.includes("dropdownmenu") || haystack.includes("react-dropdown-menu")) {
+    return "dropdown-menu";
+  }
+  if (haystack.includes("popover") || haystack.includes("react-popover")) {
+    return "popover";
+  }
+  if (haystack.includes("dialog") || haystack.includes("react-dialog")) {
+    return "dialog";
+  }
+  return null;
+}
+
+function resolveComponentEntries(filePaths) {
+  return filePaths.map((filePath) => {
+    const previewPath = findPreviewCompanion(filePath);
+    let autoPreviewType = null;
+    if (!previewPath) {
+      try {
+        const content = fs.readFileSync(filePath, "utf8");
+        autoPreviewType = inferAutoPreviewType(content);
+      } catch {
+        autoPreviewType = null;
+      }
+    }
+    return {
+      componentPath: path.relative(ROOT, filePath).replace(/\\/g, "/"),
+      previewPath: previewPath
+        ? path.relative(ROOT, previewPath).replace(/\\/g, "/")
+        : null,
+      autoPreviewType,
+    };
+  });
+}
+
+function toAutoPreviewFileName(componentPath) {
+  const sanitized = componentPath
+    .replace(/[\\/]/g, "__")
+    .replace(/[^A-Za-z0-9._-]/g, "_");
+  return `${sanitized}.preview.tsx`;
+}
+
+function createAutoPreviewSource(type, componentAbsPath) {
+  const importPath = toFsImportPath(componentAbsPath);
+  const header = `import React from "react";
+import * as Module from ${JSON.stringify(importPath)};`;
+  if (type === "alert-dialog") {
+    return `${header}
+const {
+  AlertDialog,
+  AlertDialogTrigger,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel,
+  AlertDialogAction,
+} = Module as any;
+
+export default function AutoAlertDialogPreview() {
+  if (!AlertDialog || !AlertDialogTrigger || !AlertDialogContent) {
+    return <div>Preview unavailable: missing AlertDialog exports.</div>;
+  }
+  return (
+    <AlertDialog defaultOpen>
+      <AlertDialogTrigger>Open</AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete item?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This action cannot be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          {AlertDialogCancel ? <AlertDialogCancel>Cancel</AlertDialogCancel> : null}
+          {AlertDialogAction ? <AlertDialogAction>Confirm</AlertDialogAction> : null}
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+`;
+  }
+  if (type === "tooltip") {
+    return `${header}
+const { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } = Module as any;
+
+export default function AutoTooltipPreview() {
+  if (!Tooltip || !TooltipTrigger || !TooltipContent) {
+    return <div>Preview unavailable: missing Tooltip exports.</div>;
+  }
+  return (
+    <TooltipProvider>
+      <Tooltip defaultOpen>
+        <TooltipTrigger>Hover me</TooltipTrigger>
+        <TooltipContent>Preview tooltip</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+`;
+  }
+  if (type === "dropdown-menu") {
+    return `${header}
+const {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} = Module as any;
+
+export default function AutoDropdownMenuPreview() {
+  if (!DropdownMenu || !DropdownMenuTrigger || !DropdownMenuContent) {
+    return <div>Preview unavailable: missing DropdownMenu exports.</div>;
+  }
+  return (
+    <DropdownMenu open onOpenChange={() => {}}>
+      <DropdownMenuTrigger>Open menu</DropdownMenuTrigger>
+      <DropdownMenuContent>
+        {DropdownMenuItem ? (
+          <>
+            <DropdownMenuItem>First</DropdownMenuItem>
+            <DropdownMenuItem>Second</DropdownMenuItem>
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+`;
+  }
+  if (type === "popover") {
+    return `${header}
+const { Popover, PopoverTrigger, PopoverContent } = Module as any;
+
+export default function AutoPopoverPreview() {
+  if (!Popover || !PopoverTrigger || !PopoverContent) {
+    return <div>Preview unavailable: missing Popover exports.</div>;
+  }
+  return (
+    <Popover defaultOpen>
+      <PopoverTrigger>Open popover</PopoverTrigger>
+      <PopoverContent>Popover content</PopoverContent>
+    </Popover>
+  );
+}
+`;
+  }
+  if (type === "dialog") {
+    return `${header}
+const {
+  Dialog,
+  DialogTrigger,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} = Module as any;
+
+export default function AutoDialogPreview() {
+  if (!Dialog || !DialogTrigger || !DialogContent) {
+    return <div>Preview unavailable: missing Dialog exports.</div>;
+  }
+  return (
+    <Dialog defaultOpen>
+      <DialogTrigger>Open</DialogTrigger>
+      <DialogContent>
+        {DialogHeader ? (
+          <DialogHeader>
+            {DialogTitle ? <DialogTitle>Dialog title</DialogTitle> : null}
+            {DialogDescription ? (
+              <DialogDescription>Dialog description</DialogDescription>
+            ) : null}
+          </DialogHeader>
+        ) : null}
+        {DialogFooter ? <DialogFooter /> : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+`;
+  }
+  return null;
+}
+
+function resolvePreviewImportPath(entry, previewDir) {
+  if (entry.previewPath) {
+    return path.join(ROOT, entry.previewPath);
+  }
+  if (!entry.autoPreviewType) return null;
+  const absComponent = path.join(ROOT, entry.componentPath);
+  const autoDir = path.join(previewDir, "auto-previews");
+  fs.mkdirSync(autoDir, { recursive: true });
+  const autoFile = path.join(autoDir, toAutoPreviewFileName(entry.componentPath));
+  const source = createAutoPreviewSource(entry.autoPreviewType, absComponent);
+  if (!source) return null;
+  fs.writeFileSync(autoFile, source);
+  return autoFile;
+}
+
+function createPreviewSummary({ framework, components, assets, bundle }) {
+  const completed = assets.filter((asset) => asset.status === "COMPLETED").length;
+  const failed = assets.filter((asset) => asset.status === "FAILED");
+  const bundleStatus = bundle ? "yes" : "no";
+  const summaryLines = [
+    `Framework: ${framework.id}`,
+    `Components: ${components.length}`,
+    `Completed: ${completed}`,
+    `Failed: ${failed.length}`,
+    `Interactive bundle: ${bundleStatus}`,
+  ];
+  if (failed.length > 0) {
+    const samples = failed
+      .slice(0, 5)
+      .map((asset) => `${asset.componentPath}: ${asset.errorMessage || "failed"}`)
+      .join(" | ");
+    summaryLines.push(`Failures sample: ${samples}`);
+  }
+  return summaryLines.join("\n");
+}
+
+function logInstallSummary() {
+  if (installSummaries.length === 0) return;
+  console.log("Install summary:");
+  for (const entry of installSummaries) {
+    const status = entry.success ? "ok" : "failed";
+    const manager = entry.manager || "unknown";
+    const packages = entry.packages.join(", ");
+    console.log(`- ${manager} ${status}: ${packages}`);
+  }
+}
+
+function getTailwindConfigPath() {
+  const candidates = [
+    "tailwind.config.js",
+    "tailwind.config.cjs",
+    "tailwind.config.mjs",
+    "tailwind.config.ts",
+  ];
+  for (const rel of candidates) {
+    const full = path.join(ROOT, rel);
+    if (fs.existsSync(full)) {
+      return full;
+    }
+  }
+  return null;
+}
+
+function ensureTailwindConfigForPostcss(configPath) {
+  if (!configPath) return null;
+  const ext = path.extname(configPath).toLowerCase();
+  if (ext === ".js" || ext === ".cjs") return configPath;
+  const outputPath = path.join(PREVIEW_DIR, "tailwind.config.cjs");
+  try {
+    const esbuild = require("esbuild");
+    esbuild.buildSync({
+      entryPoints: [configPath],
+      outfile: outputPath,
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      target: "node18",
+      logLevel: "silent",
+    });
+    return outputPath;
+  } catch {
+    console.warn(
+      "Failed to transpile Tailwind config for previews, using defaults.",
+    );
+    return null;
+  }
+}
+
+function toPosixPath(value) {
+  return value.replace(/\\/g, "/");
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripJsonComments(content) {
+  return content
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+}
+
+function stripJsonTrailingCommas(content) {
+  return content.replace(/,\s*([}\]])/g, "$1");
+}
+
+function extractAliasFromRaw(raw, configPath) {
+  const baseUrlMatch = raw.match(/"baseUrl"\s*:\s*"([^"]+)"/);
+  const baseUrl = baseUrlMatch ? baseUrlMatch[1] : "";
+  const baseDir = configPath ? path.dirname(configPath) : ROOT;
+  const aliasRegex = /"([^"]+\/\*)"\s*:\s*\[\s*"([^"]+)"\s*\]/g;
+  const aliases = [];
+  let match = aliasRegex.exec(raw);
+  while (match) {
+    const key = match[1];
+    const target = match[2];
+    if (key.endsWith("/*")) {
+      const find = key.replace(/\/\*$/, "");
+      const replacement = path.resolve(
+        baseDir,
+        baseUrl,
+        target.replace(/\/\*$/, ""),
+      );
+      const regexSource = `^${escapeRegExp(find)}/`;
+      aliases.push({ find, replacement, regexSource, needsTrailingSlash: true });
+    }
+    match = aliasRegex.exec(raw);
+  }
+  return aliases;
+}
+
+function resolveConfigExtends(basePath, extendValue) {
+  if (!extendValue) return null;
+  if (extendValue.startsWith(".") || extendValue.startsWith("/")) {
+    const candidate = path.resolve(path.dirname(basePath), extendValue);
+    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(`${candidate}.json`)) return `${candidate}.json`;
+    return null;
+  }
+  try {
+    return require.resolve(extendValue, { paths: [path.dirname(basePath)] });
+  } catch {
+    return null;
+  }
+}
+
+function loadTsConfig(configPath, visited = new Set()) {
+  if (!configPath || visited.has(configPath)) return null;
+  visited.add(configPath);
+  try {
+    const raw = fs.readFileSync(configPath, "utf8");
+    const cleaned = stripJsonTrailingCommas(stripJsonComments(raw));
+    const parsed = JSON.parse(cleaned);
+    const extendPath = resolveConfigExtends(configPath, parsed.extends);
+    const base = extendPath ? loadTsConfig(extendPath, visited) : null;
+    const baseCompiler = base?.compilerOptions || {};
+    const parsedCompiler = parsed.compilerOptions || {};
+    const mergedCompiler = {
+      ...baseCompiler,
+      ...parsedCompiler,
+      paths: {
+        ...(baseCompiler.paths || {}),
+        ...(parsedCompiler.paths || {}),
+      },
+    };
+    return {
+      ...base,
+      ...parsed,
+      compilerOptions: mergedCompiler,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getProjectAliases() {
+  const candidates = ["tsconfig.json", "jsconfig.json"];
+  const aliases = [];
+  let config = null;
+  let configPath = null;
+  let rawContent = null;
+
+  for (const filename of candidates) {
+    const full = path.join(ROOT, filename);
+    if (!fs.existsSync(full)) continue;
+    try {
+      rawContent = fs.readFileSync(full, "utf8");
+    } catch {
+      rawContent = null;
+    }
+    config = loadTsConfig(full);
+    configPath = full;
+    if (config) break;
+  }
+
+  const compilerOptions = config?.compilerOptions || {};
+  const baseUrl = compilerOptions.baseUrl
+    ? path.resolve(path.dirname(configPath || ROOT), compilerOptions.baseUrl)
+    : ROOT;
+  const paths = compilerOptions.paths || {};
+
+  for (const [key, targets] of Object.entries(paths)) {
+    if (!Array.isArray(targets) || targets.length === 0) continue;
+    const hasWildcard = key.endsWith("/*");
+    const find = key.replace(/\/\*$/, "");
+    const target = String(targets[0]).replace(/\/\*$/, "");
+    const replacement = path.resolve(baseUrl, target);
+    const regexSource = hasWildcard
+      ? `^${escapeRegExp(find)}/`
+      : null;
+    aliases.push({ find, replacement, regexSource, needsTrailingSlash: hasWildcard });
+  }
+
+  if (aliases.length === 0 && rawContent && configPath) {
+    aliases.push(...extractAliasFromRaw(rawContent, configPath));
+  }
+
+  return aliases;
+}
+
+function normalizeAliasEntries(entries) {
+  const seen = new Set();
+  const unique = [];
+  for (const entry of entries) {
+    if (!entry?.find || !entry?.replacement) continue;
+    const key = `${entry.find}:${entry.regexSource || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push({
+      find: entry.find,
+      replacement: toPosixPath(entry.replacement),
+      regexSource: entry.regexSource || null,
+      needsTrailingSlash: Boolean(entry.needsTrailingSlash),
+    });
+  }
+  return unique;
+}
+
+function writeTailwindPreviewConfig(configPath) {
+  const transpiled = ensureTailwindConfigForPostcss(configPath);
+  const previewConfigPath = path.join(PREVIEW_DIR, "tailwind.preview.cjs");
+  const defaultContent = [
+    path.join(ROOT, "src/**/*.{js,ts,jsx,tsx,mdx}"),
+    path.join(ROOT, "app/**/*.{js,ts,jsx,tsx,mdx}"),
+    path.join(ROOT, "pages/**/*.{js,ts,jsx,tsx,mdx}"),
+    path.join(ROOT, "components/**/*.{js,ts,jsx,tsx,mdx}"),
+  ].map(toPosixPath);
+  const configSource = `const path = require("path");
+const repoRoot = ${JSON.stringify(toPosixPath(ROOT))};
+let userConfig = {};
+${
+  transpiled
+    ? `try {
+  const loaded = require(${JSON.stringify(toPosixPath(transpiled))});
+  userConfig = loaded && (loaded.default || loaded);
+} catch {}
+`
+    : ""
+}
+const defaultContent = ${JSON.stringify(defaultContent, null, 2)};
+function normalizePattern(pattern) {
+  if (typeof pattern !== "string") return pattern;
+  const negated = pattern.startsWith("!");
+  const raw = negated ? pattern.slice(1) : pattern;
+  const abs = path.isAbsolute(raw) ? raw : path.join(repoRoot, raw);
+  const normalized = abs.replace(/\\\\/g, "/");
+  return (negated ? "!" : "") + normalized;
+}
+function resolveContent(raw) {
+  if (!raw) return defaultContent;
+  if (Array.isArray(raw)) return raw.map(normalizePattern);
+  if (raw && typeof raw === "object" && Array.isArray(raw.files)) {
+    return { ...raw, files: raw.files.map(normalizePattern) };
+  }
+  return defaultContent;
+}
+const content = resolveContent(userConfig?.content || userConfig?.purge);
+module.exports = { ...userConfig, content };
+`;
+  fs.writeFileSync(previewConfigPath, configSource);
+  return previewConfigPath;
+}
+
+function getTailwindMajorVersion(globalCssPath) {
+  try {
+    const pkgPath = path.join(ROOT, "package.json");
+    const content = fs.readFileSync(pkgPath, "utf8");
+    const pkg = JSON.parse(content);
+    const version =
+      pkg?.dependencies?.tailwindcss || pkg?.devDependencies?.tailwindcss;
+    if (typeof version === "string") {
+      const match = version.match(/\d+/);
+      if (match) return Number.parseInt(match[0], 10);
+    }
+  } catch {
+    // ignore and fallback
+  }
+  if (!globalCssPath) return null;
+  try {
+    const content = fs.readFileSync(globalCssPath, "utf8");
+    if (/@import\s+['"]tailwindcss['"]/.test(content)) {
+      return 4;
+    }
+    if (/@tailwind\s+(base|components|utilities)/.test(content)) {
+      return 3;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function extractCssImports(cssContent) {
+  const importRegex =
+    /@import\s+(?:url\(\s*)?(?:(['"])([^'"]+)\1|([^'")\s]+))(\s*\)?.*)?;/gi;
+  const imports = [];
+  let match = importRegex.exec(cssContent);
+  while (match) {
+    const rawPath = match[2] || match[3] || "";
+    if (rawPath) imports.push(rawPath);
+    match = importRegex.exec(cssContent);
+  }
+  return imports;
+}
+
+function cssUsesTailwind(cssPath, visited) {
+  if (!cssPath) return false;
+  if (visited.has(cssPath)) return false;
+  visited.add(cssPath);
+  try {
+    const content = fs.readFileSync(cssPath, "utf8");
+    if (content.includes("@tailwind") || content.includes("tailwindcss")) {
+      return true;
+    }
+    const imports = extractCssImports(content);
+    for (const rawPath of imports) {
+      if (
+        rawPath.startsWith("http://") ||
+        rawPath.startsWith("https://") ||
+        rawPath.startsWith("//") ||
+        rawPath.startsWith("data:") ||
+        rawPath.startsWith("/")
+      ) {
+        continue;
+      }
+      const absPath = path.resolve(path.dirname(cssPath), rawPath);
+      if (fs.existsSync(absPath) && cssUsesTailwind(absPath, visited)) {
+        return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function globalCssHasTailwind(cssPath) {
+  if (!cssPath) return false;
+  return cssUsesTailwind(cssPath, new Set());
+}
+
+function findGlobalCss() {
+  const candidates = [
+    "src/app/globals.css",
+    "app/globals.css",
+    "src/styles/globals.css",
+    "src/styles/index.css",
+    "src/index.css",
+    "styles/globals.css",
+  ];
+
+  const existing = [];
+  for (const rel of candidates) {
+    const full = path.join(ROOT, rel);
+    if (fs.existsSync(full)) {
+      existing.push(full);
+    }
+  }
+
+  if (existing.length === 0) return null;
+
+  const withTailwind = existing.find((filePath) =>
+    globalCssHasTailwind(filePath),
+  );
+  return withTailwind || existing[0];
+}
+
+function toFsImportPath(absPath) {
+  return `/@fs/${absPath.replace(/\\/g, "/")}`;
+}
+
+function parseImportRule(rule) {
+  const match =
+    /@import\s+(?:url\(\s*)?(?:(['"])([^'"]+)\1|([^'")\s]+))(\s*\)?.*)?;/i.exec(
+      rule,
+    );
+  if (!match) return null;
+  return {
+    rawPath: match[2] || match[3] || "",
+    trailing: match[4] || "",
+  };
+}
+
+function extractCharset(cssContent) {
+  const match = cssContent.match(/^\s*@charset\s+[^;]+;\s*/i);
+  if (!match) return { charset: "", rest: cssContent };
+  return { charset: match[0].trim(), rest: cssContent.slice(match[0].length) };
+}
+
+function rewriteTailwindSources(cssContent, baseDir) {
+  return cssContent.replace(/@source\s+([^;]+);/gi, (match, raw) => {
+    const cleaned = raw.trim().replace(/^['"]|['"]$/g, "");
+    if (
+      !cleaned ||
+      cleaned.startsWith("http://") ||
+      cleaned.startsWith("https://") ||
+      cleaned.startsWith("//") ||
+      cleaned.startsWith("data:") ||
+      cleaned.startsWith("/")
+    ) {
+      return match;
+    }
+    const resolved = path.resolve(baseDir, cleaned).replace(/\\/g, "/");
+    return '@source "' + resolved + '";';
+  });
+}
+
+function getDefaultTailwindSources() {
+  return [
+    path.join(ROOT, "src/**/*.{js,ts,jsx,tsx,mdx}"),
+    path.join(ROOT, "app/**/*.{js,ts,jsx,tsx,mdx}"),
+    path.join(ROOT, "pages/**/*.{js,ts,jsx,tsx,mdx}"),
+    path.join(ROOT, "components/**/*.{js,ts,jsx,tsx,mdx}"),
+  ].map(toPosixPath);
+}
+
+function normalizeTailwindSyntax(cssContent, tailwindMajor, baseDir) {
+  if (tailwindMajor !== 4) {
+    const importRegex =
+      /@import\s+(?:url\(\s*)?(?:(['"])tailwindcss\1|tailwindcss)(?:\s+[^;]+)?;/gi;
+    const replaced = cssContent.replace(
+      importRegex,
+      "@tailwind base;\n@tailwind components;\n@tailwind utilities;",
+    );
+    return replaced.replace(/^\s*@source\s+[^;]+;\s*/gim, "");
+  }
+  let next = cssContent;
+  if (!/@source\s+/i.test(next)) {
+    const sources = getDefaultTailwindSources()
+      .map((source) => `@source "${source}";`)
+      .join("\n");
+    const importRegex =
+      /@import\s+(?:url\(\s*)?(?:(['"])tailwindcss\1|tailwindcss)(?:\s+[^;]+)?;/i;
+    if (importRegex.test(next)) {
+      next = next.replace(importRegex, (match) => `${match}\n${sources}`);
+    } else {
+      next = `${sources}\n${next}`;
+    }
+  }
+  return rewriteTailwindSources(next, baseDir);
+}
+
+function extractImportsAndBody(cssContent) {
+  const { charset, rest } = extractCharset(cssContent);
+  const imports = [];
+  const bodyParts = [];
+  let i = 0;
+
+  while (i < rest.length) {
+    const next = rest.indexOf("@import", i);
+    if (next === -1) {
+      bodyParts.push(rest.slice(i));
+      break;
+    }
+
+    bodyParts.push(rest.slice(i, next));
+    let j = next + "@import".length;
+    let inSingle = false;
+    let inDouble = false;
+    let parenDepth = 0;
+
+    while (j < rest.length) {
+      const ch = rest[j];
+      if (ch === "'" && !inDouble) {
+        inSingle = !inSingle;
+      } else if (ch === '"' && !inSingle) {
+        inDouble = !inDouble;
+      } else if (!inSingle && !inDouble) {
+        if (ch === "(") parenDepth += 1;
+        if (ch === ")" && parenDepth > 0) parenDepth -= 1;
+        if (ch === ";" && parenDepth === 0) {
+          j += 1;
+          break;
+        }
+      }
+      j += 1;
+    }
+
+    const rule = rest.slice(next, j).trim();
+    if (rule.startsWith("@import")) {
+      imports.push(rule);
+    } else {
+      bodyParts.push(rule);
+    }
+    i = j;
+  }
+
+  const body = bodyParts.join("").trimStart();
+  return { charset, imports, body };
+}
+
+function normalizeCssForVite(cssContent, baseDir, cache, tailwindMajor) {
+  const normalizedCss = normalizeTailwindSyntax(
+    cssContent,
+    tailwindMajor,
+    baseDir,
+  );
+  const { charset, imports, body } = extractImportsAndBody(normalizedCss);
+  const mergedImports = [];
+  const bodyParts = [];
+
+  for (const rule of imports) {
+    const parsed = parseImportRule(rule);
+    if (!parsed) {
+      mergedImports.push(rule);
+      continue;
+    }
+
+    const rawPath = parsed.rawPath;
+    if (
+      !rawPath ||
+      rawPath.startsWith("http://") ||
+      rawPath.startsWith("https://") ||
+      rawPath.startsWith("//") ||
+      rawPath.startsWith("data:") ||
+      rawPath.startsWith("/")
+    ) {
+      mergedImports.push(rule);
+      continue;
+    }
+
+    const absPath = path.resolve(baseDir, rawPath);
+    if (!fs.existsSync(absPath)) {
+      mergedImports.push(rule);
+      continue;
+    }
+
+    if (!cache.has(absPath)) {
+      const content = fs.readFileSync(absPath, "utf8");
+      cache.set(
+        absPath,
+        normalizeCssForVite(content, path.dirname(absPath), cache, tailwindMajor),
+      );
+    }
+
+    const normalized = cache.get(absPath);
+    const child = extractImportsAndBody(normalized);
+    if (child.imports.length > 0) {
+      mergedImports.push(...child.imports);
+    }
+    if (child.body) {
+      bodyParts.push(child.body);
+    }
+  }
+
+  if (body) {
+    bodyParts.push(body);
+  }
+
+  const parts = [];
+  if (charset) parts.push(charset);
+  if (mergedImports.length > 0) {
+    const uniqueImports = Array.from(new Set(mergedImports));
+    parts.push(uniqueImports.join("\n"));
+  }
+  if (bodyParts.length > 0) {
+    parts.push(bodyParts.join("\n\n"));
+  }
+
+  return `${parts.join("\n\n")}\n`;
+}
+
+function encodeBundlePayload(value) {
+  if (!value) return value;
+  if (PREVIEW_BUNDLE_GZIP_THRESHOLD > 0 && value.length < PREVIEW_BUNDLE_GZIP_THRESHOLD) {
+    return value;
+  }
+  const gz = zlib.gzipSync(Buffer.from(value, "utf8"), { level: 9 });
+  return `gz:${gz.toString("base64")}`;
+}
+
+function writeNormalizedGlobalCss(globalCssPath) {
+  if (!globalCssPath) return null;
+  const targetPath = path.join(PREVIEW_DIR, "src", "preview-global.css");
+  try {
+    const content = fs.readFileSync(globalCssPath, "utf8");
+    const cache = new Map();
+    const tailwindMajor = getTailwindMajorVersion(globalCssPath);
+    const normalized = normalizeCssForVite(
+      content,
+      path.dirname(globalCssPath),
+      cache,
+      tailwindMajor,
+    );
+    fs.writeFileSync(targetPath, normalized);
+    return "./preview-global.css";
+  } catch {
+    return null;
+  }
+}
+
+function writePreviewStubs(stubDir) {
+  fs.mkdirSync(stubDir, { recursive: true });
+
+  fs.writeFileSync(
+    path.join(stubDir, "next-link.tsx"),
+    `import React from "react";
+export default function Link({ href, children, ...props }: any) {
+  return (
+    <a href={typeof href === "string" ? href : "#"} {...props}>
+      {children}
+    </a>
+  );
+}
+`,
+  );
+
+    fs.writeFileSync(
+      path.join(stubDir, "next-image.tsx"),
+      `import React from "react";
+
+function resolveSrc(raw: any) {
+  if (!raw) return raw;
+  const base =
+    typeof window !== "undefined" &&
+    (window as any).__EXHIBIT_ASSET_BASE__ &&
+    typeof (window as any).__EXHIBIT_ASSET_BASE__ === "string"
+      ? (window as any).__EXHIBIT_ASSET_BASE__
+      : "";
+  const rawSrc = typeof raw === "string" ? raw : raw?.src;
+  if (typeof rawSrc !== "string") return raw;
+  if (!rawSrc.startsWith("/") || rawSrc.startsWith("//") || rawSrc.startsWith(base)) {
+    return raw;
+  }
+  const next = base + rawSrc;
+  return typeof raw === "string" ? next : { ...raw, src: next };
+}
+
+export default function Image({ alt = "", src, ...props }: any) {
+  const resolved = resolveSrc(src);
+  return <img alt={alt} src={resolved as any} {...props} />;
+}
+`,
+    );
+
+  fs.writeFileSync(
+    path.join(stubDir, "next-navigation.ts"),
+    `export function useRouter() {
+  return {
+    push: () => {},
+    replace: () => {},
+    prefetch: async () => {},
+    back: () => {},
+    forward: () => {}
+  };
+}
+export function usePathname() {
+  return "/";
+}
+export function useSearchParams() {
+  return new URLSearchParams();
+}
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "next-router.ts"),
+    `export function useRouter() {
+  return {
+    push: () => {},
+    replace: () => {},
+    prefetch: async () => {},
+    back: () => {},
+    forward: () => {}
+  };
+}
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "next-head.tsx"),
+    `import React from "react";
+export default function Head({ children }: any) {
+  return <>{children}</>;
+}
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "prisma-client.ts"),
+    `export const PrismaClient = function PrismaClient() {
+  throw new Error("PrismaClient is not available in previews.");
+};
+export const Prisma = {};
+export default {};
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "env.ts"),
+    `export function createEnv(config: any = {}) {
+  const defaults = config.runtimeEnv || config.client || {};
+  return new Proxy(defaults, {
+    get(target, prop) {
+      if (typeof prop !== "string") return undefined;
+      if (prop in target) return target[prop];
+      if (/URL|URI/i.test(prop)) return "https://example.com";
+      return "preview";
+    },
+  });
+}
+export const env = createEnv();
+export default { createEnv };
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "empty-module.ts"),
+    `const noop = () => undefined;
+const stub = new Proxy(noop, {
+  get: () => stub,
+  apply: () => undefined,
+});
+export const __exhibitStub = true;
+export default stub;
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "clerk.tsx"),
+    `import React from "react";
+export function ClerkProvider({ children }: any) {
+  return <>{children}</>;
+}
+export function SignedIn({ children }: any) {
+  return <>{children}</>;
+}
+export function SignedOut({ children }: any) {
+  return null;
+}
+export function ClerkLoaded({ children }: any) {
+  return <>{children}</>;
+}
+export function ClerkLoading() {
+  return null;
+}
+export function useAuth() {
+  return {
+    isSignedIn: false,
+    userId: null,
+    sessionId: null,
+    getToken: async () => null,
+  };
+}
+export function useUser() {
+  return { isSignedIn: false, user: null };
+}
+export function useClerk() {
+  return {
+    openSignIn: () => {},
+    openUserProfile: () => {},
+    signOut: async () => {},
+  };
+}
+export const SignIn = ({ children }: any) => <>{children}</>;
+export const SignUp = ({ children }: any) => <>{children}</>;
+export const SignOutButton = ({ children }: any) => <>{children}</>;
+export const SignInButton = ({ children }: any) => <>{children}</>;
+export const SignUpButton = ({ children }: any) => <>{children}</>;
+export const UserButton = () => null;
+export default { ClerkProvider };
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "convex-react.tsx"),
+    `import React from "react";
+
+export function ConvexProvider({ children }: any) {
+  return <>{children}</>;
+}
+export function ConvexProviderWithClerk({ children }: any) {
+  return <>{children}</>;
+}
+export function Authenticated({ children }: any) {
+  return <>{children}</>;
+}
+export function Unauthenticated({ children }: any) {
+  return null;
+}
+export function AuthLoading({ children }: any) {
+  return null;
+}
+export function useMutation() {
+  return async () => null;
+}
+export function useQuery() {
+  return undefined;
+}
+export function usePaginatedQuery() {
+  return { results: [], status: "Loading", loadMore: async () => undefined };
+}
+export function useConvex() {
+  return {};
+}
+export function useAction() {
+  return async () => null;
+}
+export function useSubscription() {
+  return {};
+}
+export default { ConvexProvider, useMutation, useQuery };
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "convex-react-clerk.tsx"),
+    `import React from "react";
+export function ConvexProviderWithClerk({ children }: any) {
+  return <>{children}</>;
+}
+export default { ConvexProviderWithClerk };
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "convex-api.ts"),
+    `function makeProxy() {
+  return new Proxy(() => null, {
+    get() {
+      return makeProxy();
+    },
+    apply() {
+      return null;
+    },
+  });
+}
+export const api = makeProxy();
+export default { api };
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "liveblocks-react.tsx"),
+    `import React from "react";
+export function ClientSideSuspense({ children }: any) {
+  return typeof children === "function" ? children() : children;
+}
+export const RoomProvider = ({ children }: any) => <>{children}</>;
+export const useRoom = () => ({});
+export const useSelf = () => null;
+export const useOthers = () => [];
+export const useStorage = () => ({});
+export const useMutation = () => async () => null;
+export const useUpdateMyPresence = () => () => {};
+export default {
+  ClientSideSuspense,
+  RoomProvider,
+};
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "liveblocks-client.ts"),
+    `export function createClient() {
+  return {};
+}
+export default { createClient };
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "liveblocks-config.tsx"),
+    `import React from "react";
+export const RoomProvider = ({ children }: any) => <>{children}</>;
+export const useRoom = () => ({});
+export const useSelf = () => null;
+export const useOthers = () => [];
+export const useStorage = () => ({});
+export const useMutation = () => async () => null;
+export const useUpdateMyPresence = () => () => {};
+export default {
+  RoomProvider,
+  useRoom,
+  useSelf,
+  useOthers,
+  useStorage,
+  useMutation,
+  useUpdateMyPresence,
+};
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "trpc-react.ts"),
+    `import React from "react";
+
+function makeProxy() {
+  return new Proxy({}, {
+    get(_target, prop) {
+      if (prop === "Provider") {
+        return ({ children }: any) => <>{children}</>;
+      }
+      if (prop === "useContext" || prop === "useUtils") {
+        return () => ({});
+      }
+      if (
+        prop === "useQuery" ||
+        prop === "useMutation" ||
+        prop === "useInfiniteQuery" ||
+        prop === "useSuspenseQuery" ||
+        prop === "useSubscription"
+      ) {
+        return () => ({
+          data: undefined,
+          error: null,
+          isLoading: false,
+          isFetching: false,
+          mutate: () => undefined,
+          mutateAsync: async () => undefined,
+        });
+      }
+      if (prop === "createClient" || prop === "createProxySSGHelpers") {
+        return () => ({});
+      }
+      return makeProxy();
+    },
+  });
+}
+
+export function createTRPCReact() {
+  return makeProxy();
+}
+
+export default { createTRPCReact };
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "trpc-react-ssg.ts"),
+    `export function createProxySSGHelpers() {
+  return {};
+}
+export default { createProxySSGHelpers };
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "trpc-next.ts"),
+    `export function withTRPC() {
+  return (App: any) => App;
+}
+
+export function createTRPCNext() {
+  return {
+    withTRPC: () => (App: any) => App,
+  };
+}
+
+export default { withTRPC, createTRPCNext };
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "trpc-client.ts"),
+    `export function createTRPCProxyClient() {
+  return {};
+}
+export function httpBatchLink() {
+  return {};
+}
+export function loggerLink() {
+  return {};
+}
+export function httpLink() {
+  return {};
+}
+export default {};
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "trpc-server.ts"),
+    `export class TRPCError extends Error {
+  constructor(opts: { message?: string } = {}) {
+    super(opts.message || "TRPC error");
+  }
+}
+export function initTRPC() {
+  return {};
+}
+export default { TRPCError, initTRPC };
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(stubDir, "api.ts"),
+    `const makeProxy = () =>
+  new Proxy(
+    {},
+    {
+      get(_target, prop) {
+        if (prop === "withTRPC") {
+          return () => (App: any) => App;
+        }
+        if (
+          prop === "useQuery" ||
+          prop === "useMutation" ||
+          prop === "useInfiniteQuery" ||
+          prop === "useSuspenseQuery" ||
+          prop === "useSubscription"
+        ) {
+          return () => ({
+            data: undefined,
+            error: null,
+            isLoading: false,
+            isFetching: false,
+            mutate: () => undefined,
+            mutateAsync: async () => undefined,
+          });
+        }
+        return makeProxy();
+      },
+    },
+  );
+
+export const api = makeProxy();
+export default { api };
+`,
+  );
+}
+
+function writePreviewApp(components, globalCssPath, framework, settings) {
+  const srcDir = path.join(PREVIEW_DIR, "src");
+  const isVue = framework?.id === "vue";
+  const mainEntry = isVue ? "main.ts" : "main.tsx";
+  const previewAppEntry = isVue ? "preview-app.ts" : "preview-app.tsx";
+  const stubDir = path.join(srcDir, "stubs");
+  const projectAliases = normalizeAliasEntries(getProjectAliases());
+  const customAliases = settings?.moduleAliases || [];
+  const stubModules = settings?.stubModules || [];
+  if (projectAliases.length > 0) {
+    console.log(
+      `Preview aliases: ${projectAliases
+        .map((alias) => alias.find)
+        .join(", ")}`,
+    );
+  }
+  fs.mkdirSync(srcDir, { recursive: true });
+  writePreviewStubs(stubDir);
+  if (!isVue) {
+    const wrapperPath = settings?.wrapper?.preview;
+    if (wrapperPath && typeof wrapperPath === "string") {
+      fs.writeFileSync(
+        path.join(srcDir, "preview-wrapper.tsx"),
+        `import React from "react";
+import * as PreviewWrapperModule from ${JSON.stringify(wrapperPath)};
+
+const PreviewWrapper =
+  (PreviewWrapperModule as any).default ||
+  (PreviewWrapperModule as any).PreviewWrapper ||
+  (PreviewWrapperModule as any).Wrapper ||
+  (({ children }: { children: React.ReactNode }) => <>{children}</>);
+
+export default PreviewWrapper;
+`,
+      );
+    } else {
+      fs.writeFileSync(
+        path.join(srcDir, "preview-wrapper.tsx"),
+        `import React from "react";
+export default function PreviewWrapper({ children }: { children: React.ReactNode }) {
+  return <>{children}</>;
+}
+`,
+      );
+    }
+  } else if (settings?.wrapper) {
+    console.warn("Preview wrapper is only supported for React previews.");
+  }
+
+  if (globalCssPath) {
+    console.log(`Preview global CSS: ${globalCssPath}`);
+  }
+
+  const componentEntries = components
+    .map((entry) => {
+      const rel = entry.componentPath;
+      const name = path.basename(rel, path.extname(rel));
+      const previewAbs = resolvePreviewImportPath(entry, srcDir);
+      const abs = previewAbs ? previewAbs : path.join(ROOT, rel);
+      return `  {\n    path: ${JSON.stringify(rel)},\n    name: ${JSON.stringify(name)},\n    importer: () => import(${JSON.stringify(toFsImportPath(abs))})\n  }`;
+    })
+    .join(",\n");
+
+  const normalizedGlobalCss = writeNormalizedGlobalCss(globalCssPath);
+  const globalImport = normalizedGlobalCss
+    ? `import ${JSON.stringify(normalizedGlobalCss)};\n`
+    : globalCssPath
+      ? `import ${JSON.stringify(toFsImportPath(globalCssPath))};\n`
+      : "";
+
+  if (normalizedGlobalCss) {
+    try {
+      const previewCssPath = path.join(PREVIEW_DIR, "src", "preview-global.css");
+      const previewCss = fs.readFileSync(previewCssPath, "utf8");
+      const head = previewCss.split("\n").slice(0, 6).join("\n");
+      console.log("Preview global CSS head:");
+      console.log(head);
+    } catch {
+      // ignore
+    }
+  }
+
+
+  const tailwindConfig = getTailwindConfigPath();
+  const usesTailwind =
+    Boolean(tailwindConfig) || globalCssHasTailwind(globalCssPath);
+  if (usesTailwind) {
+    const tailwindMajor = getTailwindMajorVersion(globalCssPath);
+    let tailwindPlugin = "tailwindcss";
+    if (tailwindMajor && tailwindMajor >= 4) {
+      if (canResolve("@tailwindcss/postcss")) {
+        tailwindPlugin = "@tailwindcss/postcss";
+      } else {
+        console.warn(
+          "Tailwind v4 detected but @tailwindcss/postcss is missing; using tailwindcss plugin fallback.",
+        );
+      }
+    }
+    const previewTailwindConfig = writeTailwindPreviewConfig(tailwindConfig);
+    if (previewTailwindConfig) {
+      console.log(`Preview Tailwind config: ${previewTailwindConfig}`);
+    }
+    const tailwindConfigPath = previewTailwindConfig
+      ? toPosixPath(previewTailwindConfig)
+      : null;
+    const tailwindPluginConfig = tailwindConfigPath
+      ? `{ config: ${JSON.stringify(tailwindConfigPath)} }`
+      : "{}";
+    fs.writeFileSync(
+      path.join(PREVIEW_DIR, "postcss.config.cjs"),
+      `module.exports = {
+  plugins: {
+    ${JSON.stringify(tailwindPlugin)}: ${tailwindPluginConfig},
+    autoprefixer: {}
+  }
+};
+`,
+    );
+  }
+
+  fs.writeFileSync(
+    path.join(PREVIEW_DIR, "index.html"),
+    `<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Exhibit Preview</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/${mainEntry}"></script>
+  </body>
+</html>
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(srcDir, "components.ts"),
+    `export const components = [\n${componentEntries}\n];\n`,
+  );
+
+  fs.writeFileSync(
+    path.join(srcDir, "preview-env.ts"),
+    `const envProxy = new Proxy(
+  { NODE_ENV: "production" },
+  {
+    get(target, prop) {
+      if (typeof prop !== "string") return undefined;
+      if (prop in target) return target[prop];
+      if (/URL|URI/i.test(prop)) return "https://example.com";
+      return "preview";
+    },
+  },
+);
+const globalProcess = globalThis as unknown as { process?: { env?: any } };
+if (!globalProcess.process) {
+  globalProcess.process = { env: envProxy };
+} else if (!globalProcess.process.env) {
+  globalProcess.process.env = envProxy;
+}
+`,
+  );
+
+  const mainSource = isVue
+    ? `${globalImport}import "./preview-env";
+import { createApp } from "vue";
+import App from "./preview-app";
+
+const root = document.getElementById("root");
+if (root) {
+  createApp(App).mount(root);
+}
+`
+    : `${globalImport}import "./preview-env";
+import React from "react";
+import { createRoot } from "react-dom/client";
+import App from "./preview-app";
+
+const root = document.getElementById("root");
+if (root) {
+  createRoot(root).render(<App />);
+}
+`;
+  fs.writeFileSync(path.join(srcDir, mainEntry), mainSource);
+
+  const adapter = getFrameworkAdapter(framework?.id);
+  const previewAppSource = adapter.createPreviewAppSource();
+  fs.writeFileSync(path.join(srcDir, previewAppEntry), previewAppSource);
+
+  const tailwindMajor = getTailwindMajorVersion(globalCssPath);
+  const vitePluginImport = isVue
+    ? 'import vue from "@vitejs/plugin-vue";'
+    : 'import react from "@vitejs/plugin-react";';
+  const vitePluginUsage = isVue ? "vue()" : "react()";
+  fs.writeFileSync(
+    path.join(PREVIEW_DIR, "vite.config.ts"),
+    `import { defineConfig } from "vite";
+${vitePluginImport}
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const repoRoot = path.resolve(__dirname, "..");
+const stubAliases = ${JSON.stringify(aliasCandidates)};
+const projectAliases = ${JSON.stringify(projectAliases)};
+const customAliases = ${JSON.stringify(customAliases)};
+const stubModules = ${JSON.stringify(stubModules)};
+const tailwindMajor = ${JSON.stringify(tailwindMajor)};
+const ENV_STUB_ID = "\\0exhibit-env";
+const TRPC_SSG_STUB_ID = "\\0exhibit-trpc-ssg";
+const API_STUB_ID = "\\0exhibit-api";
+const EMPTY_MODULE_PATH = path.resolve(__dirname, "src/stubs/empty-module.ts");
+
+function virtualStubPlugin() {
+  return {
+    name: "exhibit-virtual-stubs",
+    enforce: "pre",
+    resolveId(id) {
+      const normalized = id.replace(/\\\\/g, "/");
+      if (id === "virtual:exhibit-env") return ENV_STUB_ID;
+      if (id === "virtual:exhibit-trpc-ssg") return TRPC_SSG_STUB_ID;
+      if (id === "virtual:exhibit-api") return API_STUB_ID;
+      if (normalized.includes("virtual:exhibit-env")) return ENV_STUB_ID;
+      if (normalized.includes("virtual:exhibit-trpc-ssg")) return TRPC_SSG_STUB_ID;
+      if (normalized.includes("virtual:exhibit-api")) return API_STUB_ID;
+      if (id === "@trpc/react-query/ssg") return TRPC_SSG_STUB_ID;
+      if (id === "env.mjs") return ENV_STUB_ID;
+      if (normalized.endsWith("/env.mjs")) return ENV_STUB_ID;
+      if (
+        normalized === "~/utils/api" ||
+        normalized === "@/utils/api" ||
+        normalized.endsWith("/utils/api") ||
+        normalized.endsWith("/utils/api.ts")
+      ) {
+        return API_STUB_ID;
+      }
+      return null;
+    },
+    load(id) {
+      if (id === TRPC_SSG_STUB_ID) {
+        return "export function createProxySSGHelpers(){return {}}; export default { createProxySSGHelpers };";
+      }
+      if (id === ENV_STUB_ID) {
+        return "export const env = new Proxy({}, { get: () => 'preview' }); export default { env };";
+      }
+      if (id === API_STUB_ID) {
+        return [
+          "const makeProxy = () =>",
+          "  new Proxy(",
+          "    {},",
+          "    {",
+          "      get(_target, prop) {",
+          "        if (prop === \\"withTRPC\\") {",
+          "          return (App) => App;",
+          "        }",
+          "        if (prop === \\"useContext\\" || prop === \\"useUtils\\") {",
+          "          return () => makeProxy();",
+          "        }",
+          "        if (",
+          "          prop === \\"useQuery\\" ||",
+          "          prop === \\"useMutation\\" ||",
+          "          prop === \\"useInfiniteQuery\\" ||",
+          "          prop === \\"useSuspenseQuery\\" ||",
+          "          prop === \\"useSubscription\\"",
+          "        ) {",
+          "          return () => ({",
+          "            data: undefined,",
+          "            error: null,",
+          "            isLoading: false,",
+          "            isFetching: false,",
+          "            mutate: () => undefined,",
+          "            mutateAsync: async () => undefined,",
+          "          });",
+          "        }",
+          "        return makeProxy();",
+          "      },",
+          "    },",
+          "  );",
+          "export const api = makeProxy();",
+          "export default { api };",
+        ].join("\\n");
+      }
+      return null;
+    },
+  };
+}
+
+function parseImportRule(rule) {
+  const match =
+    /@import\\s+(?:url\\(\\s*)?(?:(['"])([^'"]+)\\1|([^'")\\s]+))(\\s*\\)?.*)?;/i.exec(
+      rule,
+    );
+  if (!match) return null;
+  return {
+    rawPath: match[2] || match[3] || "",
+    trailing: match[4] || "",
+  };
+}
+
+function extractCharset(cssContent) {
+  const match = cssContent.match(/^\\s*@charset\\s+[^;]+;\\s*/i);
+  if (!match) return { charset: "", rest: cssContent };
+  return { charset: match[0].trim(), rest: cssContent.slice(match[0].length) };
+}
+
+function rewriteTailwindSources(cssContent, baseDir) {
+  return cssContent.replace(/@source\\s+([^;]+);/gi, (match, raw) => {
+    const cleaned = raw.trim().replace(/^['"]|['"]$/g, "");
+    if (
+      !cleaned ||
+      cleaned.startsWith("http://") ||
+      cleaned.startsWith("https://") ||
+      cleaned.startsWith("//") ||
+      cleaned.startsWith("data:") ||
+      cleaned.startsWith("/")
+    ) {
+      return match;
+    }
+    const resolved = path.resolve(baseDir, cleaned).replace(/\\\\\\\\/g, "/");
+    return '@source "' + resolved + '";';
+  });
+}
+
+function normalizeTailwindSyntax(cssContent, tailwindMajor, baseDir) {
+  if (tailwindMajor !== 4) {
+    const importRegex =
+      /@import\\s+(?:url\\(\\s*)?(?:(['"])tailwindcss\\1|tailwindcss)(?:\\s+[^;]+)?;/gi;
+    const replaced = cssContent.replace(
+      importRegex,
+      "@tailwind base;\\n@tailwind components;\\n@tailwind utilities;",
+    );
+    return replaced.replace(/^\\s*@source\\s+[^;]+;\\s*/gim, "");
+  }
+  return rewriteTailwindSources(cssContent, baseDir);
+}
+
+function extractImportsAndBody(cssContent) {
+  const { charset, rest } = extractCharset(cssContent);
+  const imports = [];
+  const bodyParts = [];
+  let i = 0;
+
+  while (i < rest.length) {
+    const next = rest.indexOf("@import", i);
+    if (next === -1) {
+      bodyParts.push(rest.slice(i));
+      break;
+    }
+
+    bodyParts.push(rest.slice(i, next));
+    let j = next + "@import".length;
+    let inSingle = false;
+    let inDouble = false;
+    let parenDepth = 0;
+
+    while (j < rest.length) {
+      const ch = rest[j];
+      if (ch === "'" && !inDouble) {
+        inSingle = !inSingle;
+      } else if (ch === '"' && !inSingle) {
+        inDouble = !inDouble;
+      } else if (!inSingle && !inDouble) {
+        if (ch === "(") parenDepth += 1;
+        if (ch === ")" && parenDepth > 0) parenDepth -= 1;
+        if (ch === ";" && parenDepth === 0) {
+          j += 1;
+          break;
+        }
+      }
+      j += 1;
+    }
+
+    const rule = rest.slice(next, j).trim();
+    if (rule.startsWith("@import")) {
+      imports.push(rule);
+    } else {
+      bodyParts.push(rule);
+    }
+    i = j;
+  }
+
+  const body = bodyParts.join("").trimStart();
+  return { charset, imports, body };
+}
+
+function normalizeCssForVite(cssContent, baseDir, cache) {
+  const normalizedCss = normalizeTailwindSyntax(
+    cssContent,
+    tailwindMajor,
+    baseDir,
+  );
+  const { charset, imports, body } = extractImportsAndBody(normalizedCss);
+  const mergedImports = [];
+  const bodyParts = [];
+
+  for (const rule of imports) {
+    const parsed = parseImportRule(rule);
+    if (!parsed) {
+      mergedImports.push(rule);
+      continue;
+    }
+
+    const rawPath = parsed.rawPath;
+    if (
+      !rawPath ||
+      rawPath.startsWith("http://") ||
+      rawPath.startsWith("https://") ||
+      rawPath.startsWith("//") ||
+      rawPath.startsWith("data:") ||
+      rawPath.startsWith("/")
+    ) {
+      mergedImports.push(rule);
+      continue;
+    }
+
+    const absPath = path.resolve(baseDir, rawPath);
+    if (!fs.existsSync(absPath)) {
+      mergedImports.push(rule);
+      continue;
+    }
+
+    if (!cache.has(absPath)) {
+      const content = fs.readFileSync(absPath, "utf8");
+      cache.set(
+        absPath,
+        normalizeCssForVite(content, path.dirname(absPath), cache),
+      );
+    }
+
+    const normalized = cache.get(absPath) || "";
+    const child = extractImportsAndBody(normalized);
+    if (child.imports.length > 0) {
+      mergedImports.push(...child.imports);
+    }
+    if (child.body) {
+      bodyParts.push(child.body);
+    }
+  }
+
+  if (body) {
+    bodyParts.push(body);
+  }
+
+  const parts = [];
+  if (charset) parts.push(charset);
+  if (mergedImports.length > 0) {
+    const uniqueImports = Array.from(new Set(mergedImports));
+    parts.push(uniqueImports.join("\\n"));
+  }
+  if (bodyParts.length > 0) {
+    parts.push(bodyParts.join("\\n\\n"));
+  }
+
+  return parts.join("\\n\\n") + "\\n";
+}
+
+function cssNormalizePlugin() {
+  const cache = new Map();
+  return {
+    name: "exhibit-css-normalize",
+    enforce: "pre",
+    load(id) {
+      const filePath = id.split("?", 1)[0];
+      if (!filePath.endsWith(".css")) return null;
+      if (filePath.includes("node_modules")) return null;
+      try {
+        const content = fs.readFileSync(filePath, "utf8");
+        return normalizeCssForVite(content, path.dirname(filePath), cache);
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+export default defineConfig({
+  root: __dirname,
+  plugins: [virtualStubPlugin(), cssNormalizePlugin(), ${vitePluginUsage}],
+  resolve: {
+    dedupe: ["react", "react-dom"],
+    alias: [
+      ...stubModules.map((name) => ({
+        find: name,
+        replacement: EMPTY_MODULE_PATH,
+      })),
+      ...customAliases.map((alias) => ({
+        find: alias.find,
+        replacement: alias.replacement,
+      })),
+      { find: "@trpc/react-query/ssg", replacement: "virtual:exhibit-trpc-ssg" },
+      { find: /~\\/env\\.mjs$/, replacement: "virtual:exhibit-env" },
+      { find: /\\/env\\.mjs$/, replacement: "virtual:exhibit-env" },
+      { find: "env.mjs", replacement: "virtual:exhibit-env" },
+      { find: /utils\\/api$/, replacement: "virtual:exhibit-api" },
+      ...stubAliases.map((alias) => ({
+        find: alias.find,
+        replacement: path.resolve(__dirname, "src/" + alias.file),
+      })),
+      ...projectAliases.map((alias) => ({
+        find: alias.regexSource ? new RegExp(alias.regexSource) : alias.find,
+        replacement: alias.replacement + (alias.needsTrailingSlash ? "/" : ""),
+      })),
+      ...projectAliases.some((alias) => alias.find === "@")
+        ? []
+        : [{ find: "@", replacement: path.resolve(repoRoot, "src") }],
+    ],
+  },
+  server: {
+    port: ${PREVIEW_PORT},
+    strictPort: true,
+    host: "127.0.0.1",
+    fs: {
+      allow: [repoRoot],
+    },
+  },
+});
+`,
+  );
+}
+
+function startVite() {
+  return spawn(
+    process.platform === "win32" ? "npx.cmd" : "npx",
+    [
+      "vite",
+      "--config",
+      path.join(PREVIEW_DIR, "vite.config.ts"),
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(PREVIEW_PORT),
+    ],
+    { stdio: "inherit" },
+  );
+}
+
+async function waitForServer(retries = 30) {
+  for (let i = 0; i < retries; i += 1) {
+    try {
+      const res = await fetch(PREVIEW_URL);
+      if (res.ok) return;
+    } catch {
+      // ignore
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error("Preview server did not start");
+}
+
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(command, args, { stdio: "inherit", ...options });
+    proc.on("error", reject);
+    proc.on("exit", (code) => {
+      if (code === 0) resolve(null);
+      else reject(new Error(`${command} ${args.join(" ")} exited with ${code}`));
+    });
+  });
+}
+
+async function buildInteractiveBundle(components, globalCssPath, framework, settings) {
+  if (!PREVIEW_INTERACTIVE) return null;
+  console.log("Building interactive preview bundle...");
+  const bundleDir = path.join(PREVIEW_DIR, "bundle");
+  const distDir = path.join(bundleDir, "dist");
+  const assetsDir = path.join(distDir, "assets");
+  const stubRoot = path.join(bundleDir, "stubs");
+  const isVue = framework?.id === "vue";
+  const bundleMainEntry = isVue ? "bundle-main.ts" : "bundle-main.tsx";
+  const bundleAppEntry = isVue ? "bundle-app.ts" : "bundle-app.tsx";
+  const projectAliases = normalizeAliasEntries(getProjectAliases());
+  const customAliases = settings?.moduleAliases || [];
+  const stubModules = settings?.stubModules || [];
+  fs.mkdirSync(bundleDir, { recursive: true });
+  writePreviewStubs(stubRoot);
+  const bundleEnvPath = path.join(stubRoot, "env.ts");
+  if (!fs.existsSync(bundleEnvPath)) {
+    writePreviewStubs(stubRoot);
+  }
+  console.log(
+    `Bundle stubs: ${stubRoot} (${fs.existsSync(bundleEnvPath) ? "ready" : "missing"})`,
+  );
+  if (!isVue) {
+    const wrapperPath = settings?.wrapper?.bundle;
+    if (wrapperPath && typeof wrapperPath === "string") {
+      fs.writeFileSync(
+        path.join(bundleDir, "bundle-wrapper.tsx"),
+        `import React from "react";
+import * as PreviewWrapperModule from ${JSON.stringify(wrapperPath)};
+
+const PreviewWrapper =
+  (PreviewWrapperModule as any).default ||
+  (PreviewWrapperModule as any).PreviewWrapper ||
+  (PreviewWrapperModule as any).Wrapper ||
+  (({ children }: { children: React.ReactNode }) => <>{children}</>);
+
+export default PreviewWrapper;
+`,
+      );
+    } else {
+      fs.writeFileSync(
+        path.join(bundleDir, "bundle-wrapper.tsx"),
+        `import React from "react";
+export default function PreviewWrapper({ children }: { children: React.ReactNode }) {
+  return <>{children}</>;
+}
+`,
+      );
+    }
+  }
+
+  const tailwindMajor = getTailwindMajorVersion(globalCssPath);
+  const bundleVitePluginImport = isVue
+    ? 'import vue from "@vitejs/plugin-vue";'
+    : 'import react from "@vitejs/plugin-react";';
+  const bundleVitePluginUsage = isVue ? "vue()" : "react()";
+  let bundleCss = "";
+  if (globalCssPath) {
+    const content = fs.readFileSync(globalCssPath, "utf8");
+    const cache = new Map();
+    bundleCss = normalizeCssForVite(
+      content,
+      path.dirname(globalCssPath),
+      cache,
+      tailwindMajor,
+    );
+  }
+  fs.writeFileSync(path.join(bundleDir, "bundle-global.css"), bundleCss);
+
+  const entries = [];
+  components.forEach((entry) => {
+    const rel = entry.componentPath;
+    const previewAbs = resolvePreviewImportPath(entry, bundleDir);
+    const abs = previewAbs ? previewAbs : path.join(ROOT, rel);
+    entries.push(
+      `  { path: ${JSON.stringify(rel)}, name: ${JSON.stringify(
+        path.basename(rel, path.extname(rel)),
+      )}, importer: () => import(${JSON.stringify(abs)}) }`,
+    );
+  });
+
+  fs.writeFileSync(
+    path.join(bundleDir, "bundle-components.ts"),
+    `export const components = [\n${entries.join(",\n")}\n];\n`,
+  );
+
+  const adapter = getFrameworkAdapter(framework?.id);
+  const bundleAppSource = adapter.createBundleAppSource();
+  fs.writeFileSync(path.join(bundleDir, bundleAppEntry), bundleAppSource);
+
+  fs.writeFileSync(
+    path.join(bundleDir, "bundle-env.ts"),
+    `const envProxy = new Proxy(
+  { NODE_ENV: "production" },
+  {
+    get(target, prop) {
+      if (typeof prop !== "string") return undefined;
+      if (prop in target) return target[prop];
+      if (/URL|URI/i.test(prop)) return "https://example.com";
+      return "preview";
+    },
+  },
+);
+const globalProcess = globalThis as unknown as { process?: { env?: any } };
+if (!globalProcess.process) {
+  globalProcess.process = { env: envProxy };
+} else if (!globalProcess.process.env) {
+  globalProcess.process.env = envProxy;
+}
+`,
+  );
+
+  const bundleMainSource = isVue
+    ? `import "./bundle-env";
+import { createApp } from "vue";
+import BundleApp from "./bundle-app";
+import "./bundle-global.css";
+
+const root = document.getElementById("root");
+if (root) {
+  createApp(BundleApp).mount(root);
+}
+`
+    : `import "./bundle-env";
+import React from "react";
+import { createRoot } from "react-dom/client";
+import BundleApp from "./bundle-app";
+import "./bundle-global.css";
+
+const root = document.getElementById("root");
+if (root) {
+  createRoot(root).render(<BundleApp />);
+}
+`;
+  fs.writeFileSync(path.join(bundleDir, bundleMainEntry), bundleMainSource);
+
+  fs.writeFileSync(
+    path.join(bundleDir, "index.html"),
+    `<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Exhibit Preview</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/${bundleMainEntry}"></script>
+  </body>
+</html>
+`,
+  );
+
+  fs.writeFileSync(
+    path.join(bundleDir, "vite.config.ts"),
+    `import { defineConfig } from "vite";
+${bundleVitePluginImport}
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const repoRoot = path.resolve(__dirname, "..", "..");
+const stubRoot = path.resolve(__dirname, "stubs");
+const stubAliases = ${JSON.stringify(aliasCandidates)};
+const projectAliases = ${JSON.stringify(projectAliases)};
+const customAliases = ${JSON.stringify(customAliases)};
+const stubModules = ${JSON.stringify(stubModules)};
+const tailwindMajor = ${JSON.stringify(tailwindMajor)};
+const ENV_STUB_ID = "\\0exhibit-env";
+const TRPC_SSG_STUB_ID = "\\0exhibit-trpc-ssg";
+const API_STUB_ID = "\\0exhibit-api";
+const EMPTY_MODULE_PATH = path.resolve(stubRoot, "empty-module.ts");
+
+function virtualStubPlugin() {
+  return {
+    name: "exhibit-virtual-stubs",
+    enforce: "pre",
+    resolveId(id) {
+      const normalized = id.replace(/\\\\/g, "/");
+      if (id === "virtual:exhibit-env") return ENV_STUB_ID;
+      if (id === "virtual:exhibit-trpc-ssg") return TRPC_SSG_STUB_ID;
+      if (id === "virtual:exhibit-api") return API_STUB_ID;
+      if (normalized.includes("virtual:exhibit-env")) return ENV_STUB_ID;
+      if (normalized.includes("virtual:exhibit-trpc-ssg")) return TRPC_SSG_STUB_ID;
+      if (normalized.includes("virtual:exhibit-api")) return API_STUB_ID;
+      if (id === "@trpc/react-query/ssg") return TRPC_SSG_STUB_ID;
+      if (id === "env.mjs") return ENV_STUB_ID;
+      if (normalized.endsWith("/env.mjs")) return ENV_STUB_ID;
+      if (
+        normalized === "~/utils/api" ||
+        normalized === "@/utils/api" ||
+        normalized.endsWith("/utils/api") ||
+        normalized.endsWith("/utils/api.ts")
+      ) {
+        return API_STUB_ID;
+      }
+      return null;
+    },
+    load(id) {
+      if (id === TRPC_SSG_STUB_ID) {
+        return "export function createProxySSGHelpers(){return {}}; export default { createProxySSGHelpers };";
+      }
+      if (id === ENV_STUB_ID) {
+        return "export const env = new Proxy({}, { get: () => 'preview' }); export default { env };";
+      }
+      if (id === API_STUB_ID) {
+        return [
+          "const makeProxy = () =>",
+          "  new Proxy(",
+          "    {},",
+          "    {",
+          "      get(_target, prop) {",
+          "        if (prop === \\"withTRPC\\") {",
+          "          return (App) => App;",
+          "        }",
+          "        if (prop === \\"useContext\\" || prop === \\"useUtils\\") {",
+          "          return () => makeProxy();",
+          "        }",
+          "        if (",
+          "          prop === \\"useQuery\\" ||",
+          "          prop === \\"useMutation\\" ||",
+          "          prop === \\"useInfiniteQuery\\" ||",
+          "          prop === \\"useSuspenseQuery\\" ||",
+          "          prop === \\"useSubscription\\"",
+          "        ) {",
+          "          return () => ({",
+          "            data: undefined,",
+          "            error: null,",
+          "            isLoading: false,",
+          "            isFetching: false,",
+          "            mutate: () => undefined,",
+          "            mutateAsync: async () => undefined,",
+          "          });",
+          "        }",
+          "        return makeProxy();",
+          "      },",
+          "    },",
+          "  );",
+          "export const api = makeProxy();",
+          "export default { api };",
+        ].join("\\n");
+      }
+      return null;
+    },
+  };
+}
+
+function parseImportRule(rule) {
+  const match =
+    /@import\\s+(?:url\\(\\s*)?(?:(['"])([^'"]+)\\1|([^'")\\s]+))(\\s*\\)?.*)?;/i.exec(
+      rule,
+    );
+  if (!match) return null;
+  return {
+    rawPath: match[2] || match[3] || "",
+    trailing: match[4] || "",
+  };
+}
+
+function extractCharset(cssContent) {
+  const match = cssContent.match(/^\\s*@charset\\s+[^;]+;\\s*/i);
+  if (!match) return { charset: "", rest: cssContent };
+  return { charset: match[0].trim(), rest: cssContent.slice(match[0].length) };
+}
+
+function rewriteTailwindSources(cssContent, baseDir) {
+  return cssContent.replace(/@source\\s+([^;]+);/gi, (match, raw) => {
+    const cleaned = raw.trim().replace(/^['"]|['"]$/g, "");
+    if (
+      !cleaned ||
+      cleaned.startsWith("http://") ||
+      cleaned.startsWith("https://") ||
+      cleaned.startsWith("//") ||
+      cleaned.startsWith("data:") ||
+      cleaned.startsWith("/")
+    ) {
+      return match;
+    }
+    const resolved = path.resolve(baseDir, cleaned).replace(/\\\\\\\\/g, "/");
+    return '@source "' + resolved + '";';
+  });
+}
+
+function normalizeTailwindSyntax(cssContent, tailwindMajor, baseDir) {
+  if (tailwindMajor !== 4) {
+    const importRegex =
+      /@import\\s+(?:url\\(\\s*)?(?:(['"])tailwindcss\\1|tailwindcss)(?:\\s+[^;]+)?;/gi;
+    const replaced = cssContent.replace(
+      importRegex,
+      "@tailwind base;\\n@tailwind components;\\n@tailwind utilities;",
+    );
+    return replaced.replace(/^\\s*@source\\s+[^;]+;\\s*/gim, "");
+  }
+  return rewriteTailwindSources(cssContent, baseDir);
+}
+
+function extractImportsAndBody(cssContent) {
+  const { charset, rest } = extractCharset(cssContent);
+  const imports = [];
+  const bodyParts = [];
+  let i = 0;
+
+  while (i < rest.length) {
+    const next = rest.indexOf("@import", i);
+    if (next === -1) {
+      bodyParts.push(rest.slice(i));
+      break;
+    }
+
+    bodyParts.push(rest.slice(i, next));
+    let j = next + "@import".length;
+    let inSingle = false;
+    let inDouble = false;
+    let parenDepth = 0;
+
+    while (j < rest.length) {
+      const ch = rest[j];
+      if (ch === "'" && !inDouble) {
+        inSingle = !inSingle;
+      } else if (ch === '"' && !inSingle) {
+        inDouble = !inDouble;
+      } else if (!inSingle && !inDouble) {
+        if (ch === "(") parenDepth += 1;
+        if (ch === ")" && parenDepth > 0) parenDepth -= 1;
+        if (ch === ";" && parenDepth === 0) {
+          j += 1;
+          break;
+        }
+      }
+      j += 1;
+    }
+
+    const rule = rest.slice(next, j).trim();
+    if (rule.startsWith("@import")) {
+      imports.push(rule);
+    } else {
+      bodyParts.push(rule);
+    }
+    i = j;
+  }
+
+  const body = bodyParts.join("").trimStart();
+  return { charset, imports, body };
+}
+
+function normalizeCssForVite(cssContent, baseDir, cache) {
+  const normalizedCss = normalizeTailwindSyntax(cssContent, tailwindMajor, baseDir);
+  const { charset, imports, body } = extractImportsAndBody(normalizedCss);
+  const mergedImports = [];
+  const bodyParts = [];
+
+  for (const rule of imports) {
+    const parsed = parseImportRule(rule);
+    if (!parsed) {
+      mergedImports.push(rule);
+      continue;
+    }
+
+    const rawPath = parsed.rawPath;
+    if (
+      !rawPath ||
+      rawPath.startsWith("http://") ||
+      rawPath.startsWith("https://") ||
+      rawPath.startsWith("//") ||
+      rawPath.startsWith("data:") ||
+      rawPath.startsWith("/")
+    ) {
+      mergedImports.push(rule);
+      continue;
+    }
+
+    const absPath = path.resolve(baseDir, rawPath);
+    if (!fs.existsSync(absPath)) {
+      mergedImports.push(rule);
+      continue;
+    }
+
+    if (!cache.has(absPath)) {
+      const content = fs.readFileSync(absPath, "utf8");
+      cache.set(
+        absPath,
+        normalizeCssForVite(content, path.dirname(absPath), cache),
+      );
+    }
+
+    const normalized = cache.get(absPath) || "";
+    const child = extractImportsAndBody(normalized);
+    if (child.imports.length > 0) {
+      mergedImports.push(...child.imports);
+    }
+    if (child.body) {
+      bodyParts.push(child.body);
+    }
+  }
+
+  if (body) {
+    bodyParts.push(body);
+  }
+
+  const parts = [];
+  if (charset) parts.push(charset);
+  if (mergedImports.length > 0) {
+    const uniqueImports = Array.from(new Set(mergedImports));
+    parts.push(uniqueImports.join("\\n"));
+  }
+  if (bodyParts.length > 0) {
+    parts.push(bodyParts.join("\\n\\n"));
+  }
+
+  return parts.join("\\n\\n") + "\\n";
+}
+
+function cssNormalizePlugin() {
+  const cache = new Map();
+  return {
+    name: "exhibit-css-normalize",
+    enforce: "pre",
+    load(id) {
+      const filePath = id.split("?", 1)[0];
+      if (!filePath.endsWith(".css")) return null;
+      if (filePath.includes("node_modules")) return null;
+      try {
+        const content = fs.readFileSync(filePath, "utf8");
+        return normalizeCssForVite(content, path.dirname(filePath), cache);
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+export default defineConfig({
+  root: __dirname,
+  plugins: [virtualStubPlugin(), cssNormalizePlugin(), ${bundleVitePluginUsage}],
+  css: {
+    postcss: path.resolve(repoRoot, ".exhibit-preview", "postcss.config.cjs"),
+  },
+  resolve: {
+    dedupe: ["react", "react-dom"],
+    alias: [
+      ...stubModules.map((name) => ({ find: name, replacement: EMPTY_MODULE_PATH })),
+      ...customAliases.map((alias) => ({
+        find: alias.find,
+        replacement: alias.replacement,
+      })),
+      { find: /\\/env\\.mjs$/, replacement: "virtual:exhibit-env" },
+      { find: "@trpc/react-query/ssg", replacement: "virtual:exhibit-trpc-ssg" },
+      { find: "next/link", replacement: path.join(stubRoot, "next-link.tsx") },
+      { find: "next/image", replacement: path.join(stubRoot, "next-image.tsx") },
+      { find: "next/navigation", replacement: path.join(stubRoot, "next-navigation.ts") },
+      { find: "next/router", replacement: path.join(stubRoot, "next-router.ts") },
+      { find: "next/head", replacement: path.join(stubRoot, "next-head.tsx") },
+      { find: ".prisma/client/index-browser", replacement: path.join(stubRoot, "prisma-client.ts") },
+      { find: "@prisma/client", replacement: path.join(stubRoot, "prisma-client.ts") },
+      { find: "@t3-oss/env-nextjs", replacement: path.join(stubRoot, "env.ts") },
+      { find: "@t3-oss/env-core", replacement: path.join(stubRoot, "env.ts") },
+      { find: "@clerk/nextjs", replacement: path.join(stubRoot, "clerk.tsx") },
+      { find: "@clerk/clerk-react", replacement: path.join(stubRoot, "clerk.tsx") },
+      { find: "@trpc/react-query", replacement: path.join(stubRoot, "trpc-react.ts") },
+      { find: "@trpc/react-query/ssg", replacement: path.join(stubRoot, "trpc-react-ssg.ts") },
+      { find: "@trpc/next", replacement: path.join(stubRoot, "trpc-next.ts") },
+      { find: "@trpc/client", replacement: path.join(stubRoot, "trpc-client.ts") },
+      { find: "@trpc/server", replacement: path.join(stubRoot, "trpc-server.ts") },
+      { find: /~\\/env\\.mjs$/, replacement: "virtual:exhibit-env" },
+      { find: "env.mjs", replacement: "virtual:exhibit-env" },
+      { find: "~/utils/api", replacement: path.join(stubRoot, "api.ts") },
+      { find: "@/utils/api", replacement: path.join(stubRoot, "api.ts") },
+      { find: /utils\\/api$/, replacement: "virtual:exhibit-api" },
+      ...stubAliases.map((alias) => ({
+        find: alias.find,
+        replacement: path.resolve(
+          stubRoot,
+          alias.file.replace(/^stubs[\\/]/, ""),
+        ),
+      })),
+      ...projectAliases.map((alias) => ({
+        find: alias.regexSource ? new RegExp(alias.regexSource) : alias.find,
+        replacement: alias.replacement + (alias.needsTrailingSlash ? "/" : ""),
+      })),
+      ...projectAliases.some((alias) => alias.find === "@")
+        ? []
+        : [{ find: "@", replacement: path.resolve(repoRoot, "src") }],
+    ],
+  },
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+    cssCodeSplit: false,
+    sourcemap: false,
+    minify: "esbuild",
+    assetsInlineLimit: 10000000,
+    rollupOptions: {
+      input: path.resolve(__dirname, "index.html"),
+      output: {
+        inlineDynamicImports: true,
+      },
+    },
+  },
+});
+`,
+  );
+
+  const command = process.platform === "win32" ? "npx.cmd" : "npx";
+  await runCommand(
+    command,
+    ["vite", "build", "--config", path.join(bundleDir, "vite.config.ts")],
+    { cwd: bundleDir },
+  );
+
+  const jsFiles = fs.existsSync(assetsDir)
+    ? fs.readdirSync(assetsDir).filter((file) => file.endsWith(".js"))
+    : [];
+  const cssFiles = fs.existsSync(assetsDir)
+    ? fs.readdirSync(assetsDir).filter((file) => file.endsWith(".css"))
+    : [];
+
+  const js = jsFiles
+    .map((file) => fs.readFileSync(path.join(assetsDir, file), "utf8"))
+    .join("\n");
+  const css = cssFiles
+    .map((file) => fs.readFileSync(path.join(assetsDir, file), "utf8"))
+    .join("\n");
+
+  if (!js) return null;
+
+  const encodedJs = encodeBundlePayload(js);
+  const encodedCss = encodeBundlePayload(css);
+  console.log(
+    `Interactive bundle ready (js ${js.length} chars, css ${css.length} chars).`,
+  );
+  return { js: encodedJs, css: encodedCss };
+}
+
+function buildInteractiveHtml(bundle, componentPath) {
+  if (!bundle) return null;
+  const cssDataUrl = bundle.css
+    ? `data:text/css;base64,${Buffer.from(bundle.css).toString("base64")}`
+    : "";
+  const jsDataUrl = bundle.js
+    ? `data:text/javascript;base64,${Buffer.from(bundle.js).toString("base64")}`
+    : "";
+  const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Exhibit Preview</title>
+    ${cssDataUrl ? `<link rel="preload" as="style" href="${cssDataUrl}" />` : ""}
+    ${cssDataUrl ? `<link rel="stylesheet" href="${cssDataUrl}" />` : ""}
+    ${jsDataUrl ? `<link rel="modulepreload" href="${jsDataUrl}" />` : ""}
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      window.__EXHIBIT_COMPONENT_PATH__ = ${JSON.stringify(componentPath)};
+    </script>
+    ${jsDataUrl ? `<script type="module" src="${jsDataUrl}"></script>` : ""}
+  </body>
+</html>`;
+  return `data:text/html;base64,${Buffer.from(html).toString("base64")}`;
+}
+
+async function renderScreenshots(components) {
+  let browser;
+  try {
+    browser = await chromium.launch();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`Screenshot rendering unavailable: ${message}`);
+    return components.map((component) => ({
+      componentPath: component.componentPath,
+      status: "FAILED",
+      errorMessage: `Preview error: ${message}`,
+    }));
+  }
+
+  let page;
+  try {
+    page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`Preview page creation failed: ${message}`);
+    await browser.close();
+    return components.map((component) => ({
+      componentPath: component.componentPath,
+      status: "FAILED",
+      errorMessage: `Preview error: ${message}`,
+    }));
+  }
+  const assets = [];
+  const previewConfig = loadPreviewConfig();
+  if (previewConfig) {
+    console.log(`Preview props config: ${previewConfig.source}`);
+  }
+  console.log(`Rendering ${components.length} component previews...`);
+  let currentComponent = "unknown";
+
+  page.on("pageerror", (err) => {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`Page error [${currentComponent}]: ${message}`);
+  });
+  page.on("console", (msg) => {
+    const type = msg.type();
+    if (type === "error" || type === "warning") {
+      console.warn(`Console ${type} [${currentComponent}]: ${msg.text()}`);
+    }
+  });
+
+  for (let i = 0; i < components.length; i += 1) {
+    const rel = components[i].componentPath;
+    currentComponent = rel;
+    console.log(`Rendering (${i + 1}/${components.length}) ${rel}`);
+    const previewProps = getPreviewPropsForPath(previewConfig, rel);
+    const url = new URL(`${PREVIEW_URL}/`);
+    url.searchParams.set("path", rel);
+    if (previewProps && Object.keys(previewProps).length > 0) {
+      url.searchParams.set("props", JSON.stringify(previewProps));
+    }
+    try {
+      await page.goto(url.toString(), { waitUntil: "networkidle" });
+      await page.waitForSelector(
+        '[data-exhibit-preview="ready"], [data-exhibit-preview="error"]',
+        {
+          timeout: 15000,
+        },
+      );
+      const status =
+        (await page.getAttribute("#exhibit-preview", "data-exhibit-preview")) ||
+        "error";
+      if (status !== "ready") {
+        const errorText = await page
+          .locator("#exhibit-preview")
+          .innerText()
+          .catch(() => "");
+        const message = errorText.trim() || "Preview error";
+        assets.push({
+          componentPath: rel,
+          status: "FAILED",
+          errorMessage: message,
+        });
+        console.warn(`Preview error for ${rel}: ${message}`);
+        continue;
+      }
+      const locator = page.locator("#exhibit-preview");
+      const buffer = await locator.screenshot({ type: "jpeg", quality: 80 });
+      const dataUrl = `data:image/jpeg;base64,${buffer.toString("base64")}`;
+      assets.push({
+        componentPath: rel,
+        imageUrl: dataUrl,
+        status: "COMPLETED",
+      });
+      console.log(`Rendered ${rel}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Render failed";
+      console.warn(`Render failed for ${rel}: ${message}`);
+      assets.push({
+        componentPath: rel,
+        status: "FAILED",
+        errorMessage: message,
+      });
+    }
+  }
+
+  await browser.close();
+  return assets;
+}
+
+async function uploadBatch(assets, jobId, bundle) {
+  console.log(
+    `Uploading batch (${assets.length} assets${bundle ? ", bundle included" : ""})...`,
+  );
+    const payload = {
+      repositoryFullName: REPO_FULL_NAME,
+      commitSha: COMMIT_SHA,
+      framework: FRAMEWORK?.id,
+      assets,
+      bundle: bundle || undefined,
+      jobId: jobId || undefined,
+  };
+
+  const res = await fetch(PREVIEW_UPLOAD_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-preview-token": PREVIEW_UPLOAD_TOKEN,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.error(`Upload failed with status ${res.status}: ${text}`);
+    throw new Error(`Upload failed (${res.status}): ${text}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (data?.assetsSaved !== undefined) {
+    console.log(
+      `Upload success: jobId=${data?.jobId || jobId || "new"} assetsSaved=${data.assetsSaved}`,
+    );
+  } else {
+    console.log(`Upload success: jobId=${data?.jobId || jobId || "new"}`);
+  }
+  if (data?.jobId) {
+    return data.jobId;
+  }
+  return jobId;
+}
+
+async function upload(assets, bundle) {
+  const completedCount = assets.filter((asset) => asset.status === "COMPLETED")
+    .length;
+  const failed = assets.filter((asset) => asset.status === "FAILED");
+  console.log(
+    `Uploading previews (${completedCount} completed, ${failed.length} failed).`,
+  );
+  if (failed.length > 0) {
+    const sample = failed
+      .slice(0, 5)
+      .map((asset) => `${asset.componentPath}: ${asset.errorMessage || "failed"}`)
+      .join("; ");
+    console.warn(`Failed preview samples: ${sample}`);
+  }
+  let jobId;
+  if (bundle) {
+    jobId = await uploadBatch([], jobId, bundle);
+  }
+  for (let i = 0; i < assets.length; i += UPLOAD_BATCH_SIZE) {
+    const batch = assets.slice(i, i + UPLOAD_BATCH_SIZE);
+    jobId = await uploadBatch(batch, jobId);
+  }
+  console.log("Uploaded previews");
+}
+
+async function main() {
+  const globalCssPath = findGlobalCss();
+  if (globalCssPath) {
+    console.log(`Detected global CSS at ${globalCssPath}`);
+  } else {
+    console.log("No global CSS detected.");
+  }
+  await ensureRuntimeDeps(FRAMEWORK, globalCssPath);
+  FRAMEWORK = detectFramework();
+  exts = FRAMEWORK.exts;
+  console.log(`Detected framework: ${FRAMEWORK.id}`);
+  if (!FRAMEWORK.supported) {
+    console.warn(`Preview adapter unavailable: ${FRAMEWORK.reason}`);
+  }
+  const previewConfig = loadPreviewConfig();
+  const previewSettings = getPreviewSettings(previewConfig);
+  if (previewConfig) {
+    console.log(`Preview props config: ${previewConfig.source}`);
+  }
+  if (previewSettings.componentRoots.length > 0) {
+    console.log(`Preview component roots: ${previewSettings.componentRoots.join(", ")}`);
+  }
+  if (previewSettings.include.length > 0) {
+    console.log(`Preview include patterns: ${previewSettings.include.join(", ")}`);
+  }
+  if (previewSettings.exclude.length > 0) {
+    console.log(`Preview exclude patterns: ${previewSettings.exclude.join(", ")}`);
+  }
+  if (previewSettings.wrapper?.display) {
+    console.log(`Preview wrapper: ${previewSettings.wrapper.display}`);
+  }
+  if (previewSettings.moduleAliases.length > 0) {
+    console.log(
+      `Preview module aliases: ${previewSettings.moduleAliases
+        .map((alias) => alias.find)
+        .join(", ")}`,
+    );
+  }
+  if (previewSettings.stubModules.length > 0) {
+    console.log(`Preview stub modules: ${previewSettings.stubModules.join(", ")}`);
+  }
+  const componentScan = findComponents(previewSettings);
+  const components = resolveComponentEntries(componentScan.files);
+  if (components.length === 0) {
+    console.log("No components found");
+    return;
+  }
+  console.log(`Found ${components.length} component files.`);
+  const previewCompanions = components.filter((entry) => entry.previewPath);
+  if (previewCompanions.length > 0) {
+    console.log(`Using ${previewCompanions.length} preview harness file(s).`);
+  }
+  if (componentScan.skipped.length > 0) {
+    console.log(`Skipped ${componentScan.skipped.length} server-only files.`);
+  }
+
+  if (!FRAMEWORK.supported) {
+    const reason =
+      FRAMEWORK.id === "react" || FRAMEWORK.id === "next"
+        ? "React runtime dependencies are missing. Install react and react-dom."
+        : FRAMEWORK.id === "vue"
+          ? "Vue runtime dependencies are missing. Install vue and @vitejs/plugin-vue."
+          : FRAMEWORK.reason;
+    console.warn(`Skipping preview generation: ${reason}`);
+    const assets = components.map((entry) => ({
+      componentPath: entry.componentPath,
+      status: "FAILED",
+      errorMessage: `Preview skipped: ${reason}`,
+    }));
+    await upload(assets, null);
+    console.log("Preview summary:");
+    console.log(
+      createPreviewSummary({
+        framework: FRAMEWORK,
+        components,
+        assets,
+        bundle: null,
+      }),
+    );
+    logInstallSummary();
+    return;
+  }
+
+  if (fs.existsSync(PREVIEW_DIR)) {
+    fs.rmSync(PREVIEW_DIR, { recursive: true, force: true });
+  }
+
+  writePreviewApp(components, globalCssPath, FRAMEWORK, previewSettings);
+
+  let interactiveBundle = null;
+  try {
+    interactiveBundle = await buildInteractiveBundle(
+      components,
+      globalCssPath,
+      FRAMEWORK,
+      previewSettings,
+    );
+  } catch (err) {
+    console.warn("Interactive bundle build failed:", err);
+  }
+
+  const viteProcess = startVite();
+  try {
+    await waitForServer();
+    const assets = await renderScreenshots(components);
+    await upload(assets, interactiveBundle);
+    console.log("Preview summary:");
+    console.log(
+      createPreviewSummary({
+        framework: FRAMEWORK,
+        components,
+        assets,
+        bundle: interactiveBundle,
+      }),
+    );
+    logInstallSummary();
+  } finally {
+    viteProcess.kill();
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
