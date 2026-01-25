@@ -15,7 +15,7 @@ jobs:
       PREVIEW_UPLOAD_URL: ${{ secrets.PREVIEW_UPLOAD_URL }}
       PREVIEW_UPLOAD_TOKEN: ${{ secrets.PREVIEW_UPLOAD_TOKEN }}
       EXHIBIT_PREVIEW_SCRIPT: scripts/exhibit-preview.js
-      EXHIBIT_FRAMEWORK: react
+      
     steps:
       - name: Checkout
         uses: actions/checkout@v4
