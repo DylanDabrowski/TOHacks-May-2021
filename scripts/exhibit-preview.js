@@ -1872,8 +1872,8 @@ export default { api };
 function writePreviewApp(components, globalCssPath, framework, settings) {
   const srcDir = path.join(PREVIEW_DIR, "src");
   const isVue = framework?.id === "vue";
-  const mainEntry = isVue ? "main.ts" : "main.tsx";
-  const previewAppEntry = isVue ? "preview-app.ts" : "preview-app.tsx";
+  const mainEntry = isVue ? "main.ts" : "main.jsx";
+  const previewAppEntry = isVue ? "preview-app.ts" : "preview-app.jsx";
   const stubDir = path.join(srcDir, "stubs");
   const projectAliases = normalizeAliasEntries(getProjectAliases());
   const customAliases = settings?.moduleAliases || [];
@@ -1891,24 +1891,24 @@ function writePreviewApp(components, globalCssPath, framework, settings) {
     const wrapperPath = settings?.wrapper?.preview;
     if (wrapperPath && typeof wrapperPath === "string") {
       fs.writeFileSync(
-        path.join(srcDir, "preview-wrapper.tsx"),
+        path.join(srcDir, "preview-wrapper.jsx"),
         `import React from "react";
 import * as PreviewWrapperModule from ${JSON.stringify(wrapperPath)};
 
 const PreviewWrapper =
-  (PreviewWrapperModule as any).default ||
-  (PreviewWrapperModule as any).PreviewWrapper ||
-  (PreviewWrapperModule as any).Wrapper ||
-  (({ children }: { children: React.ReactNode }) => <>{children}</>);
+  PreviewWrapperModule.default ||
+  PreviewWrapperModule.PreviewWrapper ||
+  PreviewWrapperModule.Wrapper ||
+  (({ children }) => <>{children}</>);
 
 export default PreviewWrapper;
 `,
       );
     } else {
       fs.writeFileSync(
-        path.join(srcDir, "preview-wrapper.tsx"),
+        path.join(srcDir, "preview-wrapper.jsx"),
         `import React from "react";
-export default function PreviewWrapper({ children }: { children: React.ReactNode }) {
+export default function PreviewWrapper({ children }) {
   return <>{children}</>;
 }
 `,
@@ -2450,8 +2450,8 @@ async function buildInteractiveBundle(components, globalCssPath, framework, sett
   const assetsDir = path.join(distDir, "assets");
   const stubRoot = path.join(bundleDir, "stubs");
   const isVue = framework?.id === "vue";
-  const bundleMainEntry = isVue ? "bundle-main.ts" : "bundle-main.tsx";
-  const bundleAppEntry = isVue ? "bundle-app.ts" : "bundle-app.tsx";
+  const bundleMainEntry = isVue ? "bundle-main.ts" : "bundle-main.jsx";
+  const bundleAppEntry = isVue ? "bundle-app.ts" : "bundle-app.jsx";
   const projectAliases = normalizeAliasEntries(getProjectAliases());
   const customAliases = settings?.moduleAliases || [];
   const stubModules = settings?.stubModules || [];
@@ -2468,24 +2468,24 @@ async function buildInteractiveBundle(components, globalCssPath, framework, sett
     const wrapperPath = settings?.wrapper?.bundle;
     if (wrapperPath && typeof wrapperPath === "string") {
       fs.writeFileSync(
-        path.join(bundleDir, "bundle-wrapper.tsx"),
+        path.join(bundleDir, "bundle-wrapper.jsx"),
         `import React from "react";
 import * as PreviewWrapperModule from ${JSON.stringify(wrapperPath)};
 
 const PreviewWrapper =
-  (PreviewWrapperModule as any).default ||
-  (PreviewWrapperModule as any).PreviewWrapper ||
-  (PreviewWrapperModule as any).Wrapper ||
-  (({ children }: { children: React.ReactNode }) => <>{children}</>);
+  PreviewWrapperModule.default ||
+  PreviewWrapperModule.PreviewWrapper ||
+  PreviewWrapperModule.Wrapper ||
+  (({ children }) => <>{children}</>);
 
 export default PreviewWrapper;
 `,
       );
     } else {
       fs.writeFileSync(
-        path.join(bundleDir, "bundle-wrapper.tsx"),
+        path.join(bundleDir, "bundle-wrapper.jsx"),
         `import React from "react";
-export default function PreviewWrapper({ children }: { children: React.ReactNode }) {
+export default function PreviewWrapper({ children }) {
   return <>{children}</>;
 }
 `,

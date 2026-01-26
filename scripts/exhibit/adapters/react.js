@@ -3,17 +3,12 @@ export function createPreviewAppSource() {
 import { components } from "./components";
 import PreviewWrapper from "./preview-wrapper";
 
-type PreviewStatus = "loading" | "ready" | "error";
-
-class PreviewErrorBoundary extends React.Component<
-  { onError: (error: Error) => void; children: React.ReactNode },
-  { hasError: boolean }
-> {
+class PreviewErrorBoundary extends React.Component {
   state = { hasError: false };
   static getDerivedStateFromError() {
     return { hasError: true };
   }
-  componentDidCatch(error: Error) {
+  componentDidCatch(error) {
     this.props.onError(error);
   }
   render() {
@@ -58,9 +53,9 @@ function transformProps(raw) {
 }
 
 export default function App() {
-  const [status, setStatus] = useState<PreviewStatus>("loading");
-  const [error, setError] = useState<string | null>(null);
-  const [Component, setComponent] = useState<any>(null);
+  const [status, setStatus] = useState("loading");
+  const [error, setError] = useState(null);
+  const [Component, setComponent] = useState(null);
 
   const targetPath = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
@@ -83,9 +78,9 @@ export default function App() {
     }
     entry
       .importer()
-      .then((mod: any) => {
+      .then((mod) => {
         const preferredName = entry?.name;
-        const isComponent = (value: any) =>
+        const isComponent = (value) =>
           typeof value === "function" ||
           (value && typeof value === "object" && "$$typeof" in value);
         const pickExport = () => {
@@ -106,7 +101,7 @@ export default function App() {
         setComponent(() => Exported);
         setStatus("ready");
       })
-      .catch((err: Error) => {
+      .catch((err) => {
         setStatus("error");
         setError(err.message);
       });
@@ -159,17 +154,12 @@ export function createBundleAppSource() {
 import { components } from "./bundle-components";
 import PreviewWrapper from "./bundle-wrapper";
 
-type PreviewStatus = "loading" | "ready" | "error";
-
-class PreviewErrorBoundary extends React.Component<
-  { onError: (error: Error) => void; children: React.ReactNode },
-  { hasError: boolean }
-> {
+class PreviewErrorBoundary extends React.Component {
   state = { hasError: false };
   static getDerivedStateFromError() {
     return { hasError: true };
   }
-  componentDidCatch(error: Error) {
+  componentDidCatch(error) {
     this.props.onError(error);
   }
   render() {
@@ -181,14 +171,14 @@ class PreviewErrorBoundary extends React.Component<
 }
 
 function resolveTargetPath() {
-  const win = window as any;
+  const win = window;
   if (win.__EXHIBIT_COMPONENT_PATH__) return win.__EXHIBIT_COMPONENT_PATH__;
   const params = new URLSearchParams(window.location.search);
   return params.get("path");
 }
 
 function resolveProps() {
-  const win = window as any;
+  const win = window;
   if (win.__EXHIBIT_COMPONENT_PROPS__) return win.__EXHIBIT_COMPONENT_PROPS__;
   const params = new URLSearchParams(window.location.search);
   const raw = params.get("props");
@@ -223,9 +213,9 @@ function transformProps(raw) {
 }
 
 export default function BundleApp() {
-  const [status, setStatus] = useState<PreviewStatus>("loading");
-  const [error, setError] = useState<string | null>(null);
-  const [Component, setComponent] = useState<any>(null);
+  const [status, setStatus] = useState("loading");
+  const [error, setError] = useState(null);
+  const [Component, setComponent] = useState(null);
 
   const targetPath = useMemo(() => resolveTargetPath(), []);
   const props = useMemo(() => resolveProps(), []);
@@ -245,9 +235,9 @@ export default function BundleApp() {
     }
     entry
       .importer()
-      .then((mod: any) => {
+      .then((mod) => {
         const preferredName = entry?.name;
-        const isComponent = (value: any) =>
+        const isComponent = (value) =>
           typeof value === "function" ||
           (value && typeof value === "object" && "$$typeof" in value);
         const pickExport = () => {
@@ -268,7 +258,7 @@ export default function BundleApp() {
         setComponent(() => Exported);
         setStatus("ready");
       })
-      .catch((err: Error) => {
+      .catch((err) => {
         setStatus("error");
         setError(err.message);
       });
