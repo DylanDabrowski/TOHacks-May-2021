@@ -227,6 +227,22 @@ function readPackageJson() {
   }
 }
 
+function getReactMajorVersion() {
+  const pkg = readPackageJson();
+  const raw = pkg?.dependencies?.react || pkg?.devDependencies?.react;
+  if (!raw || typeof raw !== "string") return null;
+  const match = raw.match(/(\d+)/);
+  if (!match) return null;
+  const major = Number(match[1]);
+  return Number.isFinite(major) ? major : null;
+}
+
+function getReactJsxRuntime() {
+  const major = getReactMajorVersion();
+  if (major && major < 17) return "classic";
+  return "automatic";
+}
+
 function hasDependency(dep) {
   const pkg = readPackageJson();
   return Boolean(pkg?.dependencies?.[dep] || pkg?.devDependencies?.[dep]);
@@ -1872,6 +1888,8 @@ export default { api };
 function writePreviewApp(components, globalCssPath, framework, settings) {
   const srcDir = path.join(PREVIEW_DIR, "src");
   const isVue = framework?.id === "vue";
+  const reactJsxRuntime = getReactJsxRuntime();
+  const esbuildJsx = reactJsxRuntime === "classic" ? "transform" : "automatic";
   const mainEntry = isVue ? "main.ts" : "main.jsx";
   const previewAppEntry = isVue ? "preview-app.ts" : "preview-app.jsx";
   const stubDir = path.join(srcDir, "stubs");
@@ -2063,7 +2081,9 @@ if (root) {
   const vitePluginImport = isVue
     ? 'import vue from "@vitejs/plugin-vue";'
     : 'import react from "@vitejs/plugin-react";';
-  const vitePluginUsage = isVue ? "vue()" : "react()";
+  const vitePluginUsage = isVue
+    ? "vue()"
+    : `react({ jsxRuntime: ${JSON.stringify(reactJsxRuntime)} })`;
   fs.writeFileSync(
     path.join(PREVIEW_DIR, "vite.config.ts"),
     `import { defineConfig } from "vite";
@@ -2351,11 +2371,11 @@ export default defineConfig({
   root: __dirname,
   plugins: [virtualStubPlugin(), cssNormalizePlugin(), ${vitePluginUsage}],
   esbuild: {
-    loader: "jsx",
-    include: [/src\\/.*\\.js$/, /src\\\\.*\\.js$/],
+    jsx: ${JSON.stringify(esbuildJsx)},
   },
   optimizeDeps: {
     esbuildOptions: {
+      jsx: ${JSON.stringify(esbuildJsx)},
       loader: { ".js": "jsx" },
     },
   },
@@ -2450,6 +2470,8 @@ async function buildInteractiveBundle(components, globalCssPath, framework, sett
   const assetsDir = path.join(distDir, "assets");
   const stubRoot = path.join(bundleDir, "stubs");
   const isVue = framework?.id === "vue";
+  const reactJsxRuntime = getReactJsxRuntime();
+  const esbuildJsx = reactJsxRuntime === "classic" ? "transform" : "automatic";
   const bundleMainEntry = isVue ? "bundle-main.ts" : "bundle-main.jsx";
   const bundleAppEntry = isVue ? "bundle-app.ts" : "bundle-app.jsx";
   const projectAliases = normalizeAliasEntries(getProjectAliases());
@@ -2497,7 +2519,9 @@ export default function PreviewWrapper({ children }) {
   const bundleVitePluginImport = isVue
     ? 'import vue from "@vitejs/plugin-vue";'
     : 'import react from "@vitejs/plugin-react";';
-  const bundleVitePluginUsage = isVue ? "vue()" : "react()";
+  const bundleVitePluginUsage = isVue
+    ? "vue()"
+    : `react({ jsxRuntime: ${JSON.stringify(reactJsxRuntime)} })`;
   let bundleCss = "";
   if (globalCssPath) {
     const content = fs.readFileSync(globalCssPath, "utf8");
@@ -2879,11 +2903,11 @@ export default defineConfig({
   root: __dirname,
   plugins: [virtualStubPlugin(), cssNormalizePlugin(), ${bundleVitePluginUsage}],
   esbuild: {
-    loader: "jsx",
-    include: [/src\\/.*\\.js$/, /src\\\\.*\\.js$/],
+    jsx: ${JSON.stringify(esbuildJsx)},
   },
   optimizeDeps: {
     esbuildOptions: {
+      jsx: ${JSON.stringify(esbuildJsx)},
       loader: { ".js": "jsx" },
     },
   },
