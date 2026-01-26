@@ -2350,6 +2350,15 @@ function cssNormalizePlugin() {
 export default defineConfig({
   root: __dirname,
   plugins: [virtualStubPlugin(), cssNormalizePlugin(), ${vitePluginUsage}],
+  esbuild: {
+    loader: "jsx",
+    include: [/src\\/.*\\.js$/, /src\\\\.*\\.js$/],
+  },
+  optimizeDeps: {
+    esbuildOptions: {
+      loader: { ".js": "jsx" },
+    },
+  },
   resolve: {
     dedupe: ["react", "react-dom"],
     alias: [
@@ -2869,6 +2878,15 @@ function cssNormalizePlugin() {
 export default defineConfig({
   root: __dirname,
   plugins: [virtualStubPlugin(), cssNormalizePlugin(), ${bundleVitePluginUsage}],
+  esbuild: {
+    loader: "jsx",
+    include: [/src\\/.*\\.js$/, /src\\\\.*\\.js$/],
+  },
+  optimizeDeps: {
+    esbuildOptions: {
+      loader: { ".js": "jsx" },
+    },
+  },
   css: {
     postcss: path.resolve(repoRoot, ".exhibit-preview", "postcss.config.cjs"),
   },
