@@ -2078,6 +2078,9 @@ if (root) {
   fs.writeFileSync(path.join(srcDir, previewAppEntry), previewAppSource);
 
   const tailwindMajor = getTailwindMajorVersion(globalCssPath);
+  const jsxFactory =
+    reactJsxRuntime === "classic" ? "React.createElement" : null;
+  const jsxFragment = reactJsxRuntime === "classic" ? "React.Fragment" : null;
   const vitePluginImport = isVue
     ? 'import vue from "@vitejs/plugin-vue";'
     : 'import react from "@vitejs/plugin-react";';
@@ -2088,6 +2091,7 @@ if (root) {
     path.join(PREVIEW_DIR, "vite.config.ts"),
     `import { defineConfig } from "vite";
 ${vitePluginImport}
+import { transform } from "esbuild";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -2104,6 +2108,27 @@ const ENV_STUB_ID = "\\0exhibit-env";
 const TRPC_SSG_STUB_ID = "\\0exhibit-trpc-ssg";
 const API_STUB_ID = "\\0exhibit-api";
 const EMPTY_MODULE_PATH = path.resolve(__dirname, "src/stubs/empty-module.ts");
+
+function jsxInJsPlugin() {
+  return {
+    name: "exhibit-jsx-in-js",
+    enforce: "pre",
+    async transform(code, id) {
+      const filePath = id.split("?", 1)[0];
+      if (!filePath.endsWith(".js") && !filePath.endsWith(".jsx")) return null;
+      if (filePath.includes("node_modules")) return null;
+      const result = await transform(code, {
+        loader: "jsx",
+        jsx: ${JSON.stringify(esbuildJsx)},
+        jsxFactory: ${jsxFactory ? JSON.stringify(jsxFactory) : "undefined"},
+        jsxFragment: ${jsxFragment ? JSON.stringify(jsxFragment) : "undefined"},
+        sourcefile: filePath,
+        sourcemap: true,
+      });
+      return { code: result.code, map: result.map };
+    },
+  };
+}
 
 function virtualStubPlugin() {
   return {
@@ -2369,7 +2394,7 @@ function cssNormalizePlugin() {
 
 export default defineConfig({
   root: __dirname,
-  plugins: [virtualStubPlugin(), cssNormalizePlugin(), ${vitePluginUsage}],
+  plugins: [jsxInJsPlugin(), virtualStubPlugin(), cssNormalizePlugin(), ${vitePluginUsage}],
   esbuild: {
     jsx: ${JSON.stringify(esbuildJsx)},
   },
@@ -2516,6 +2541,9 @@ export default function PreviewWrapper({ children }) {
   }
 
   const tailwindMajor = getTailwindMajorVersion(globalCssPath);
+  const jsxFactory =
+    reactJsxRuntime === "classic" ? "React.createElement" : null;
+  const jsxFragment = reactJsxRuntime === "classic" ? "React.Fragment" : null;
   const bundleVitePluginImport = isVue
     ? 'import vue from "@vitejs/plugin-vue";'
     : 'import react from "@vitejs/plugin-react";';
@@ -2623,6 +2651,7 @@ if (root) {
     path.join(bundleDir, "vite.config.ts"),
     `import { defineConfig } from "vite";
 ${bundleVitePluginImport}
+import { transform } from "esbuild";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -2640,6 +2669,27 @@ const ENV_STUB_ID = "\\0exhibit-env";
 const TRPC_SSG_STUB_ID = "\\0exhibit-trpc-ssg";
 const API_STUB_ID = "\\0exhibit-api";
 const EMPTY_MODULE_PATH = path.resolve(stubRoot, "empty-module.ts");
+
+function jsxInJsPlugin() {
+  return {
+    name: "exhibit-jsx-in-js",
+    enforce: "pre",
+    async transform(code, id) {
+      const filePath = id.split("?", 1)[0];
+      if (!filePath.endsWith(".js") && !filePath.endsWith(".jsx")) return null;
+      if (filePath.includes("node_modules")) return null;
+      const result = await transform(code, {
+        loader: "jsx",
+        jsx: ${JSON.stringify(esbuildJsx)},
+        jsxFactory: ${jsxFactory ? JSON.stringify(jsxFactory) : "undefined"},
+        jsxFragment: ${jsxFragment ? JSON.stringify(jsxFragment) : "undefined"},
+        sourcefile: filePath,
+        sourcemap: true,
+      });
+      return { code: result.code, map: result.map };
+    },
+  };
+}
 
 function virtualStubPlugin() {
   return {
@@ -2901,7 +2951,7 @@ function cssNormalizePlugin() {
 
 export default defineConfig({
   root: __dirname,
-  plugins: [virtualStubPlugin(), cssNormalizePlugin(), ${bundleVitePluginUsage}],
+  plugins: [jsxInJsPlugin(), virtualStubPlugin(), cssNormalizePlugin(), ${bundleVitePluginUsage}],
   esbuild: {
     jsx: ${JSON.stringify(esbuildJsx)},
   },
